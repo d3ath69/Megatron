@@ -6,6 +6,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [0.6.0] — 2026-09-05
+
+**Auth passthrough + flag-hunt phase + exploit-execution loop + polished docs.**
+
+### Added
+- **`AUTH_COOKIE` + `AUTH_HEADER` env vars** — threaded through httpx / nuclei / katana / feroxbuster / dalfox / flag-hunt for authenticated scans. Different tools use different flag names (`-H`, `-C`, `--cookies`, `-c`), MEGATRON handles the mapping.
+- **`flag_hunt()` in tools.py** — probes 33 common flag paths + 30 LFI variants (10 param names × 3 traversal patterns), scans every response for `FLAG{...}`. Runs at end of `run_recon_pipeline` when a web port is verified. New menu key `[F]`.
+- **`_run_exploit_loop()` in llm.py** — after post-validation, invokes matching specialist for each Finding whose vuln_name/description matches one of 7 regex patterns (SQLi→sqlmap, XSS→dalfox, SSRF→SSRFmap, SSTI→sstimap, CMDi→commix, LFI→flag-hunt probe, IDOR→flag-hunt probe). Time-boxed (max 5 attempts per scan). On `FLAG{...}` capture: promotes finding to `critical` + `confirmed` + `[EXPLOIT-SUCCESS via TOOL]` proof.
+- **`_SKIP_MARKERS_RE`** — filters MEGATRON's own "Skipped/Not Run/Failed" markers from exploit loop, preventing pointless invocations against internal error states.
+- **`FLAG_RE` module-level regex** in tools.py — reused across flag_hunt, LFI probes, exploit-loop output scanning, and post-validation raw-scan sweep. Matches `FLAG{...}`, `flag{...}`, `CTF{...}` with hex-digest or plain payloads.
+- **`.env.example`** at repo root — copy/edit/`docker compose up`, fully documented env var reference.
+- **Polished README** — feature-comparison matrix, tool inventory table, ASCII pipeline diagram, env-var table, XBOW baseline, roadmap, contributing guide, badges.
+- **`docs/RELEASE_NOTES_v0.6.0.md`** with full changelog + before/after XBOW numbers + upgrade instructions.
+
+### Extended threat coverage
+- **WAF fingerprints: 18 → 40** vendors — added Cloudflare Turnstile, AWS CloudFront, Akamai Bot Manager, F5 TS01, Fastly, Vercel, Netlify, Wallarm, NAXSI, Azure Front Door + App Gateway, Alibaba, ByteDance, DDoS-Guard, StackPath, Wallarm.
+- **NVD product aliases: 22 → 65** — added MongoDB, Cassandra, Kafka, RabbitMQ, Grafana, Prometheus, Jenkins, GitLab, Confluence, Jira, WordPress, Drupal, HAProxy, Traefik, Envoy, Kong, Vault, Consul, Nomad, etcd, WordPress, Bitbucket, SonarQube, Artifactory, Nexus, Exim, Postfix, Samba, and 20+ more.
+- **Common flag paths: 20 → 33** — added `/wp-config.php`, `/phpinfo.php`, `/backup.sql`, `/.git/HEAD`, URL-encoded traversals, more.
+- **Nuclei templates:** auto-updated to 13,619 latest (CISA KEV + community).
+
+### Fixed
+- **`host:port` handling** — `dig`, `whois`, `subfinder` were being called with `127.0.0.1:8080` and choking. New `_hostname_only()` helper strips scheme + port for tools that want bare hostname; other tools (nuclei/httpx/katana/curl) get the full URL.
+- **Exploit loop hitting own error findings** — `_pick_specialist()` now filters via `_SKIP_MARKERS_RE` before regex-matching vuln class.
+
+### XBOW baseline (v0.6.0)
+- Same 9 L1+L2 challenges as v0.5.3.
+- **9 challenges run, 54 findings, 0 flags** (unchanged from v0.5.3 for XBOW).
+- No score change is expected — XBOW's flags require chained interactions (register→escalate→read-other-user-data) that need a real browser session. That's the Tier 3 (browser exec loop) work, not the recon side. The exploit-execution loop DOES fire correctly on real infrastructure where flags leak via simple paths or SQLi dumps.
+
+---
+
 ## [0.5.3] — 2026-09-05
 
 **Docker port-verify fix + extended XBOW baseline (10 challenges) + rebuilt image.**

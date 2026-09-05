@@ -1,187 +1,274 @@
+<div align="center">
+
 # 🤖 MEGATRON
 
-**AI-driven autonomous penetration testing framework for CPTC-style engagements.**
+**Autonomous AI penetration testing framework — Ollama-local, structured-output, NVD-grounded.**
 
-Ollama-local, structured-output LLM analysis, NVD-grounded CVEs, 20+ specialist recon tools chained into a single pipeline.
+*Built for CPTC-style engagements and self-audit of your own infrastructure.*
 
-Built on top of [sooryathejas/METATRON](https://github.com/sooryathejas/METATRON) — substantially rewritten (structured output, ground-truth probes, proactive CVE injection, modern 2025-2026 tool stack).
+[![License: GPL v3](https://img.shields.io/badge/License-GPL_v3-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg?logo=docker)](docs/DOCKER.md)
+[![Ollama](https://img.shields.io/badge/Ollama-local-white.svg)](https://ollama.com)
+[![Latest](https://img.shields.io/github/v/tag/d3ath69/Megatron?label=latest)](https://github.com/d3ath69/Megatron/tags)
+
+</div>
 
 ---
 
-## What makes it different
+## What is MEGATRON?
+
+MEGATRON is a **command-line autonomous pentest agent** that combines a modern 2025-2026 recon-tool stack (20+ specialists) with a **local Ollama LLM** that reads the raw scan output and produces a structured vulnerability report. Every LLM claim is grounded against the NIST NVD API; every service+version tuple it detects triggers a proactive CVE lookup so no known KEV goes unreported.
+
+Unlike hosted alternatives, everything runs on your box — **no cloud API keys, no data leaves your network**, and the whole thing fits inside one `docker compose up`. Designed for CPTC / OSCP-style engagements and pre-competition self-audit.
+
+**Origin:** Started as a rewrite of [sooryathejas/METATRON](https://github.com/sooryathejas/METATRON). Structured-output pipeline, ground-truth probes, NVD grounding, 2025-2026 tool stack, WAF/OpenAPI/subdomain auto-chains, flag-hunt phase, and exploit-execution loop are all d3ath69 work — see [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## What sets it apart
 
 | Failure mode of most AI pentesters | How MEGATRON handles it |
 |---|---|
-| LLM hallucinates CVEs → false findings in the report | Every LLM-claimed CVE is verified against the NIST NVD API; unverified CVEs are stripped and severity downgraded |
-| LLM is too conservative → misses obvious KEV CVEs (e.g., Apache 2.4.49) | Proactive product+version → NVD lookup **injects** grounded CVEs the LLM missed |
-| Regex-parsing free-text LLM output breaks on the first bold markdown | Pydantic + Ollama `format=` JSON schema — zero regex, deterministic output |
-| Naabu SYN-scan false positives waste minutes of nmap deep-scanning | Every naabu-claimed port is verified via raw TCP handshake before nmap runs |
-| Port 22 open → assumed to be SSH, missed tarpits/honeypots | Dedicated banner classifier: `REAL_SSH` / `TARPIT_SUSPECT` / `EMPTY_ACCEPT` / `NON_SSH_DATA` |
-| No OpenAPI awareness | Auto-probes 10 known Swagger/OpenAPI paths → chains `schemathesis` if found |
-| No WAF awareness | Fingerprints 18 WAF signatures from response headers |
+| LLM invents CVEs → false findings in the report | **NVD verification pass** strips every unverified CVE and downgrades severity |
+| LLM is too conservative → misses obvious KEV CVEs (Apache 2.4.49 = CVE-2021-41773) | **Proactive NVD product+version injection** adds grounded CVEs regardless of what the LLM said |
+| Regex-parsing free-text LLM output breaks on the first `**bold**` | **Pydantic + Ollama `format=` schema** — zero regex, deterministic JSON |
+| Naabu SYN-scan false positives waste minutes of nmap deep-scans | **`_tcp_verify()` two-stage**: raw socket + curl HTTP fallback for docker's dynamic-port range |
+| Port 22 open → assumed to be SSH, missed tarpits/honeypots | **`probe_ssh_banner()`** classifier: `REAL_SSH` / `TARPIT_SUSPECT` / `EMPTY_ACCEPT` / `NON_SSH_DATA` |
+| No OpenAPI awareness | **Auto-probes 10 conventional paths** → chains `schemathesis` if hit |
+| No WAF awareness | **Fingerprints 40 WAF signatures** from response headers (Cloudflare, Akamai, Imperva, F5, Fastly, Vercel, Netlify, Azure Front Door, Alibaba, ByteDance, etc.) |
+| Findings without ports/services are noise for report writers | **`_fill_missing_ports()`** cross-references LLM output against scan service-map — guaranteed port/service fill via 60+ product aliases |
+| Findings but no proof → useless report | **Exploit-execution loop** invokes matching specialist (sqlmap/dalfox/sstimap/SSRFmap/commix/LFI-probe) and updates findings with `[EXPLOIT-SUCCESS]` proof |
+| Passive recon misses obvious leaked flags | **`flag_hunt()` phase** probes 20+ common flag paths + LFI variants, scans all output for `FLAG{...}` markers |
 
 ---
 
 ## The stack
 
-**Ground-truth probes** (in-house)
-Naabu-verify (TCP handshake reconciliation) · TLS cert grabber (openssl s_client, SNI-aware) · SSH banner classifier · WAF fingerprint · OpenAPI auto-detect
+<div align="center">
 
-**Recon** (2020-era classics, still useful)
-`nmap` · `whois` · `whatweb` · `curl` · `dig` · `nikto`
+| Category | Tools | JSON output |
+|---|---|:---:|
+| **Ground-truth probes** *(in-house)* | naabu-verify (2-stage TCP+HTTP) · TLS cert grabber (SNI-aware) · SSH banner classifier · WAF fingerprint (40 vendors) · OpenAPI auto-detect · flag-hunt · exploit-execution loop | ✅ |
+| **Classic recon** | `nmap` · `whois` · `whatweb` · `curl` · `dig` · `nikto` | mixed |
+| **Modern recon (2024-2026)** | `naabu` · `httpx-pd` · `nuclei` (13,619 templates) · `katana` (JS-aware SPA crawler) · `feroxbuster` · `subfinder` (30+ sources) | ✅ |
+| **Vulnerability specialists (2025-2026)** | `dalfox` (XSS) · `sqlmap` (SQLi) · `commix` (cmd) · `sstimap` (SSTI) · `SSRFmap` (SSRF) · `crlfuzz` (CRLF) · `schemathesis` (OpenAPI fuzz) · `trufflehog` (secrets) · `semgrep` (SAST) | ✅ |
+| **Post-scan** *(optional)* | `gowitness` (screenshots) · `testssl.sh` (deep TLS) · Playwright probe (form/DOM/xhr extraction) · MariaDB persistence · ReportLab PDF/HTML export | mixed |
+| **LLM** | Ollama with `qwen2.5:7b-instruct` (35 tok/s, safe default) OR `Qwythos-9B-Claude-Mythos` (114 tok/s, uncensored, recommended for CPTC) | JSON schema-constrained |
 
-**Recon** (2024-2026 modern)
-`naabu` · `httpx-pd` · `nuclei` (13,619 templates) · `katana` (JS-aware SPA crawler) · `feroxbuster` (recursive content discovery) · `subfinder` (30+ passive sources)
-
-**Vulnerability specialists** (2025-2026 best-in-class)
-`dalfox` (XSS) · `sqlmap` (SQLi) · `commix` (cmd injection) · `sstimap` (SSTI) · `SSRFmap` (SSRF) · `crlfuzz` (CRLF) · `schemathesis` (OpenAPI fuzz) · `trufflehog` (secrets) · `semgrep` (SAST)
-
-**Post-scan** (optional)
-`gowitness` (screenshots) · `testssl.sh` (deep TLS audit) · MariaDB persistence · ReportLab PDF/HTML export
-
-**LLM**
-Two well-supported models, pick via `MODEL_NAME` env var:
-
-| Model | Size | Speed on RTX 3070 | Notes |
-|---|---|---|---|
-| `qwen2.5:7b-instruct` (default) | 4.7 GB | ~35 tok/s | Stable, well-tested, safe defaults (temp 0.1, think=false) |
-| `hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M` (recommended for CPTC) | 5.6 GB | **~114 tok/s** ★ | Uncensored, Claude-fine-tuned, 1M context, native function calling. Use `MODEL_TEMPERATURE=0.5 MODEL_THINK=false`. |
-
-Docker: pass any of `MODEL_NAME` / `MODEL_TEMPERATURE` / `MODEL_THINK` / `OLLAMA_TIMEOUT` in a `.env` file. Bare-metal: `export` before `python megatron.py`. See [docs/DOCKER.md](docs/DOCKER.md) and [docs/INSTALL.md](docs/INSTALL.md).
+</div>
 
 ---
 
 ## Pipeline flow (the `[p]` menu option)
 
 ```
-naabu -top-ports 1000
-  ↓  filter false positives via raw TCP handshake
-nmap -sV -sC (verified ports only)
-  ↓
-nmap -sU --top-ports 100  (UDP: SNMP/DNS/TFTP/IPMI/NetBIOS)
-  ↓
-openssl s_client → x509  (every TLS-suspect port)
-  ↓
-ssh-banner classifier    (port 22 if verified)
-  ↓
-whois + dig
-  ↓  if any web port verified:
-httpx-pd (tech/title/server/TLS/IP/CNAME)
-  ↓
-nuclei -tags kev  (CISA Known-Exploited-Vulnerabilities)
-  ↓
-WAF fingerprint  (18 vendor signatures)
-  ↓
-katana crawl -depth 2 -jc  (JS-aware)
-  ↓
-feroxbuster (recursive, SecLists raft-medium wordlist)
-  ↓
-dalfox url --format json  (XSS on discovered URLs)
-  ↓  if OpenAPI/Swagger spec auto-detected:
-schemathesis run --checks=all
-  ↓  if target is a domain (not IP):
-subfinder -d TARGET -all -silent
-  ↓
-Ollama structured analysis (Pydantic ScanReport schema)
-  ↓
-Post-validation:
-  1. Cited evidence_lines exist in raw_scan?  → downgrade if not
-  2. LLM-claimed CVE verified in NVD?         → strip + downgrade if not
-  3. Detected services → NVD product+version  → INJECT grounded CVEs
-  ↓
-MariaDB save (5 tables: history / vulnerabilities / fixes / exploits_attempted / summary)
-  ↓
-Optional PDF / HTML export via ReportLab
+                       naabu -top-ports 1000
+                                │
+                                ▼
+                  filter false positives (TCP handshake)
+                                │
+                                ▼
+        nmap -sV -sC (verified ports)   nmap -sU --top-ports 100
+                                │
+                                ▼
+              openssl s_client → x509  (each TLS-suspect port)
+                                │
+                                ▼
+                      ssh-banner classifier (if port 22)
+                                │
+                                ▼
+                              whois + dig
+                                │
+                                ▼
+                  ── if any web port verified ──
+                                │
+             ┌──────────────────┼──────────────────┐
+             ▼                  ▼                  ▼
+        httpx-pd            nuclei-kev         WAF fingerprint
+             │                  │                  │
+             └──────────────────┼──────────────────┘
+                                ▼
+                    katana crawl (JS-aware, depth 2)
+                                │
+                                ▼
+                feroxbuster (recursive, SecLists wordlist)
+                                │
+                                ▼
+                dalfox url --format json (XSS on discovered URLs)
+                                │
+                                ▼
+              flag-hunt (20+ common paths + LFI variants)
+                                │
+                                ▼
+                 ── if OpenAPI spec auto-detected ──
+                                ▼
+                     schemathesis run --checks=all
+                                │
+                                ▼
+                 ── if target is a domain (not IP) ──
+                                ▼
+                       subfinder -d TARGET -all
+                                │
+                                ▼
+              Ollama structured analysis (Pydantic ScanReport)
+                                │
+                                ▼
+                    POST-VALIDATION (3 passes):
+                    1) Verify evidence_lines exist in raw_scan
+                    2) NVD-verify every LLM-claimed CVE
+                    3) Backfill missing port/service via service-map
+                                │
+                                ▼
+              NVD product+version injection (proactive CVE add)
+                                │
+                                ▼
+              EXPLOIT-EXECUTION LOOP (v0.6.0+):
+                    For each Finding with port+service:
+                      SQLi   → sqlmap  --batch --dump
+                      XSS    → dalfox
+                      SSRF   → SSRFmap -m readfiles
+                      SSTI   → sstimap
+                      CMDi   → commix
+                      LFI    → flag-hunt path probes
+                    If FLAG{...} captured → severity=critical, confidence=confirmed
+                                │
+                                ▼
+              MariaDB save (5 tables) + optional PDF/HTML export
 ```
 
 ---
 
 ## Install
 
-**Fast path — Docker (recommended):**
+**Fast path — Docker (recommended)**:
+
 ```bash
 git clone git@github.com:d3ath69/Megatron.git && cd Megatron
 docker compose up -d --build
 docker compose exec megatron python3 megatron.py
 ```
-Full Docker docs: [docs/DOCKER.md](docs/DOCKER.md).
 
-**Bare metal — Ubuntu 24.04 / Parrot OS.** Full step-by-step is in [docs/INSTALL.md](docs/INSTALL.md). Quick summary:
+First build takes ~10-15 min (downloads all 20+ tools + SecLists 2.5GB). Subsequent builds cached.
 
-```bash
-git clone git@github.com:d3ath69/Megatron.git ~/Megatron
-cd ~/Megatron
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt sstimap schemathesis semgrep sqlmap
+**Bare metal — Ubuntu 24.04 / Parrot OS** — full step-by-step in [docs/INSTALL.md](docs/INSTALL.md).
 
-# System recon tools (universe repo on Ubuntu 24.04)
-sudo add-apt-repository -y universe && sudo apt update
-sudo apt install -y nmap whois whatweb curl dnsutils nikto mariadb-server unzip openssl
-
-# SecLists (~2.5GB of wordlists)
-sudo git clone --depth 1 https://github.com/danielmiessler/SecLists.git /opt/SecLists
-
-# ProjectDiscovery binaries (naabu / httpx-pd / nuclei / subfinder / katana)
-# Modern specialists (dalfox / feroxbuster / trufflehog / crlfuzz / gowitness)
-# commix (needs python→python3 shebang fix)
-# SSRFmap (git clone, no pip)
-#
-# See docs/INSTALL.md for the full copy-paste block.
-
-# Ollama + model
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:7b-instruct
-
-# MariaDB schema (creates megatron DB + user + 5 tables)
-sudo mariadb < docs/schema.sql
-```
-
-**GPU note:** `qwen2.5:7b-instruct` fits comfortably in 8GB VRAM. For the 27B model (`hf.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED:Q4_K_M`) you need 24GB+. Ollama auto-detects; add `OLLAMA_SCHED_SPREAD=true` to spread across multiple GPUs.
+**Prerequisites (host, not in container):**
+- Ollama installed with at least one model:
+  ```bash
+  curl -fsSL https://ollama.com/install.sh | sh
+  ollama pull hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M   # recommended (114 tok/s, uncensored)
+  # or
+  ollama pull qwen2.5:7b-instruct   # safer default (35 tok/s)
+  ```
+- NVIDIA GPU recommended (Ollama uses it on the host, no `nvidia-container-toolkit` needed)
+- 8GB+ RAM, 10GB+ disk
 
 ---
 
 ## Usage
 
 ```bash
+docker compose exec megatron python3 megatron.py
+# or bare metal:
 cd ~/Megatron && source venv/bin/activate && python megatron.py
 ```
 
-Menu → `[1] New Scan` → target IP or domain → `[p] MEGATRON pipeline (RECOMMENDED)`.
+Menu → `[1] New Scan` → target → `[p] MEGATRON pipeline (RECOMMENDED)`.
 
-Individual specialist scans available via single-letter keys:
-- `[x]` dalfox XSS · `[q]` sqlmap SQLi · `[k]` katana crawl · `[f]` feroxbuster dirbust
-- `[c]` commix cmd injection · `[i]` sstimap SSTI · `[r]` ssrfmap SSRF · `[l]` crlfuzz
-- `[e]` subfinder subdomains · `[h]` trufflehog secrets · `[g]` semgrep SAST
-- `[w]` WAF detect · `[v]` gowitness screenshot · `[y]` schemathesis API fuzz
-- `[t]` TLS cert grab · `[s]` SSH banner probe
+**Individual specialist scans** via single-letter keys:
+<div align="center">
 
-Chain multiple: `1 8 9 t s` runs nmap + httpx + nuclei-kev + TLS cert + SSH probe.
+| Recon | Specialists | Post-scan |
+|:---:|:---:|:---:|
+| `[1]` nmap deep | `[x]` dalfox XSS | `[t]` TLS cert |
+| `[u]` nmap UDP | `[q]` sqlmap SQLi | `[s]` SSH banner |
+| `[7]` naabu | `[c]` commix cmdi | `[w]` WAF detect |
+| `[8]` httpx | `[i]` sstimap SSTI | `[F]` flag-hunt |
+| `[9]` nuclei-KEV | `[r]` SSRFmap SSRF | `[v]` gowitness |
+| `[0]` nuclei full | `[l]` crlfuzz | `[b]` playwright probe |
+| `[k]` katana crawl | `[y]` schemathesis | |
+| `[f]` feroxbuster | `[h]` trufflehog | |
+| `[e]` subfinder | `[g]` semgrep SAST | |
+
+</div>
+
+Chain multiple: `1 8 9 t s` runs nmap + httpx + nuclei-kev + TLS + SSH probe.
+
+---
+
+## Configuration (env vars)
+
+Copy `.env.example` to `.env` and edit. All variables have safe defaults for a fresh install.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MODEL_NAME` | Qwythos-9B (Q4_K_M) | Any Ollama-visible tag |
+| `MODEL_TEMPERATURE` | `0.5` | `0.1` for qwen2.5, `0.5` for Qwythos |
+| `MODEL_THINK` | `false` | `true` only for reasoning models that need it |
+| `OLLAMA_HOST` | `host.docker.internal:11434` (Docker) or `localhost:11434` (bare) | Where Ollama runs |
+| `OLLAMA_TIMEOUT` | `600` | Bump to `1200` for 27B or slow paths |
+| `AUTH_COOKIE` | *(unset)* | e.g. `sessionid=abc; csrftoken=xyz` — threaded through httpx/nuclei/katana/feroxbuster/dalfox/flag-hunt for logged-in scans |
+| `AUTH_HEADER` | *(unset)* | e.g. `Authorization: Bearer eyJ...` |
+| `NVD_API_KEY` | *(unset)* | Free at nvd.nist.gov — 5→50 req/30s |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `mariadb` / `3306` / `megatron` / `123` / `megatron` | Docker uses compose service names |
+
+---
+
+## XBOW benchmark
+
+MEGATRON includes a harness against the [XBOW Validation Benchmarks](https://github.com/xbow-engineering/validation-benchmarks) — the 104 CTF-style Docker challenges used to score AI pentesters.
+
+```bash
+python3 scripts/xbow_bench.py --clone
+python3 scripts/xbow_bench.py --run-many XBEN-005-24,XBEN-006-24,XBEN-009-24
+python3 scripts/xbow_bench.py --score
+```
+
+**Current baseline (v0.6.0, 9 L1+L2 challenges):**
+- Findings: 54 across 9 targets, avg 6/challenge
+- Flags captured: 0/9 (as predicted — MEGATRON is black-box + no browser exec loop)
+
+**Reference:** [Shannon](https://github.com/KeygraphHQ/shannon) = 96.15% on the full 104 (source-aware + browser-driven exploitation). Closing that gap requires a Playwright agent loop we don't ship yet (foundation is in `run_playwright_probe()`).
+
+The baseline exists to measure trajectory — every future release should re-run the same subset and post the delta.
 
 ---
 
 ## Roadmap
 
-- [ ] **Browser automation** for exploit PoC validation (Shannon-style "No Exploit, No Report")
-- [ ] **XBOW benchmark** self-test harness — score MEGATRON against the 104-challenge standard
-- [ ] **Multi-agent decomposition** — Scout / Analyzer / Exploiter / Reporter (AutoPentest-AI pattern)
+- [x] Modern 2025-2026 tool stack (v0.4.0)
+- [x] Docker one-command install (v0.5.0)
+- [x] NVD product+version proactive CVE injection (v0.5.3)
+- [x] Auth passthrough for authenticated scans (v0.6.0)
+- [x] Flag-hunt phase + exploit-execution loop (v0.6.0)
+- [ ] **Multi-agent decomposition** (Scout / Analyzer / Exploiter / Reporter — AutoPentest-AI pattern)
+- [ ] **Browser-driven exploit validation** ("No Exploit, No Report" — Shannon-style)
 - [ ] **Vulnerability chaining** via knowledge-graph BFS (Web Cache Deception → SSRF → cloud metadata)
-- [ ] Prompt improvement so 7B fills the `port` / `service` fields (currently only NVD-injected findings have them)
-- [ ] Auto-detect and route by service type: SMB → enum4linux-ng, Windows AD → BloodHound
+- [ ] **Auto-route by service type**: SMB → enum4linux-ng, Windows AD → BloodHound
+- [ ] **CI/CD integration**: fail pipeline on `severity >= high` findings
 
 ---
 
-## Attribution
+## Contributing
 
-Original CLI + DB schema + PDF exporter by **[Soorya Thejas](https://github.com/sooryathejas)** ([sooryathejas/METATRON](https://github.com/sooryathejas/METATRON)).
+Additions welcome — the wrapper pattern in `tools.py` is deliberately simple. To add a new specialist:
 
-Rewrite / rebrand as MEGATRON by **[d3ath69](https://github.com/d3ath69)** — structured output, ground-truth probes, NVD grounding, 2025-2026 tool stack, WAF/OpenAPI/subdomain auto-chains.
+1. Wrap the CLI in `tools.py` following the `run_*` pattern (typed args, `subprocess` via `run_tool()`, print announcement)
+2. Add to `TOOLS_MENU` with a single-letter menu key
+3. Add binary name to `ALLOWED_TOOLS` for LLM `[TOOL:...]` dispatch
+4. If it detects a vuln class → add a regex row to `_VULN_SPECIALIST_MAP` in `llm.py` so the exploit-loop can call it
+5. Pin its version in the Dockerfile's specialist-tools layer — no `/latest` API calls (GitHub anonymous rate limit is 60/h)
+
+See [docs/INSTALL.md](docs/INSTALL.md) for the full bare-metal install pattern.
 
 ---
 
-## License
+## Attribution & License
 
-GPL-3.0 — see [LICENSE](LICENSE).
+- Original CLI + DB schema + PDF exporter: **[Soorya Thejas](https://github.com/sooryathejas)** ([sooryathejas/METATRON](https://github.com/sooryathejas/METATRON), MIT)
+- Structured-output rewrite / MEGATRON rebrand + 2025-2026 stack + XBOW harness + flag-hunt / exploit-execution: **[d3ath69](https://github.com/d3ath69)** (GPL-3.0)
 
-Upstream [sooryathejas/METATRON](https://github.com/sooryathejas/METATRON) is MIT-licensed; MIT → GPL is a compatible upgrade, so MEGATRON is redistributed under GPL with the original MIT copyright preserved in attribution.
+MIT → GPL is a compatible upgrade; the original MIT copyright is preserved in [LICENSE](LICENSE).
 
 **⚠️ For authorized testing only.** Unauthorized scanning is illegal in most jurisdictions. You are solely responsible for compliance with all applicable laws and terms of service.

@@ -20,7 +20,11 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, ValidationError
 from ollama import Client as OllamaClient
 
-from tools import run_tool_by_command
+from tools import (
+    run_tool_by_command,
+    run_sqlmap, run_dalfox, run_ssrfmap, run_sstimap, run_commix,
+    flag_hunt, FLAG_RE,
+)
 from search import handle_search_dispatch, verify_cve_nvd, nvd_search_by_product
 
 _SERVICE_VERSION_RE = re.compile(
@@ -29,28 +33,71 @@ _SERVICE_VERSION_RE = re.compile(
 )
 
 _PRODUCT_ALIAS = {
-    "apache": ("apache", "http_server"),
-    "httpd":  ("apache", "http_server"),
-    "nginx":  ("nginx", "nginx"),
-    "openssh": ("openbsd", "openssh"),
-    "ssh":     ("openbsd", "openssh"),
-    "mysql":  ("oracle", "mysql"),
-    "mariadb":("mariadb", "mariadb"),
-    "jetty":  ("eclipse", "jetty"),
-    "tomcat": ("apache", "tomcat"),
-    "postgres":("postgresql", "postgresql"),
-    "postgresql":("postgresql", "postgresql"),
-    "openvpn":("openvpn", "openvpn"),
-    "asterisk":("digium", "asterisk"),
-    "freepbx": ("sangoma", "freepbx"),
-    "unifi":  ("ubiquiti", "unifi_network_application"),
-    "ubiquiti":("ubiquiti", "unifi_network_application"),
-    "vcenter": ("vmware", "vcenter_server"),
-    "vsphere": ("vmware", "vsphere"),
-    "redis":  ("redis", "redis"),
+    "apache":       ("apache", "http_server"),
+    "httpd":        ("apache", "http_server"),
+    "nginx":        ("nginx", "nginx"),
+    "openssh":      ("openbsd", "openssh"),
+    "ssh":          ("openbsd", "openssh"),
+    "mysql":        ("oracle", "mysql"),
+    "mariadb":      ("mariadb", "mariadb"),
+    "jetty":        ("eclipse", "jetty"),
+    "tomcat":       ("apache", "tomcat"),
+    "postgres":     ("postgresql", "postgresql"),
+    "postgresql":   ("postgresql", "postgresql"),
+    "openvpn":      ("openvpn", "openvpn"),
+    "asterisk":     ("digium", "asterisk"),
+    "freepbx":      ("sangoma", "freepbx"),
+    "unifi":        ("ubiquiti", "unifi_network_application"),
+    "ubiquiti":     ("ubiquiti", "unifi_network_application"),
+    "vcenter":      ("vmware", "vcenter_server"),
+    "vsphere":      ("vmware", "vsphere"),
+    "redis":        ("redis", "redis"),
     "elasticsearch":("elastic", "elasticsearch"),
-    "kubernetes":("kubernetes", "kubernetes"),
-    "docker": ("docker", "docker"),
+    "kubernetes":   ("kubernetes", "kubernetes"),
+    "docker":       ("docker", "docker"),
+    "mongodb":      ("mongodb", "mongodb"),
+    "cassandra":    ("apache", "cassandra"),
+    "kafka":        ("apache", "kafka"),
+    "rabbitmq":     ("pivotal", "rabbitmq"),
+    "memcached":    ("memcached", "memcached"),
+    "minio":        ("minio", "minio"),
+    "vault":        ("hashicorp", "vault"),
+    "consul":       ("hashicorp", "consul"),
+    "nomad":        ("hashicorp", "nomad"),
+    "etcd":         ("coreos", "etcd"),
+    "grafana":      ("grafana", "grafana"),
+    "prometheus":   ("prometheus", "prometheus"),
+    "jenkins":      ("jenkins", "jenkins"),
+    "gitlab":       ("gitlab", "gitlab"),
+    "gitea":        ("gitea", "gitea"),
+    "confluence":   ("atlassian", "confluence_server"),
+    "jira":         ("atlassian", "jira_server"),
+    "bitbucket":    ("atlassian", "bitbucket"),
+    "sonarqube":    ("sonarsource", "sonarqube"),
+    "artifactory":  ("jfrog", "artifactory"),
+    "nexus":        ("sonatype", "nexus_repository"),
+    "wordpress":    ("wordpress", "wordpress"),
+    "drupal":       ("drupal", "drupal"),
+    "joomla":       ("joomla", "joomla"),
+    "magento":      ("magento", "magento"),
+    "openresty":    ("openresty", "openresty"),
+    "haproxy":      ("haproxy", "haproxy"),
+    "traefik":      ("traefik", "traefik"),
+    "envoy":        ("envoy", "envoy"),
+    "kong":         ("kong", "kong"),
+    "3cx":          ("3cx", "3cx"),
+    "exim":         ("exim", "exim"),
+    "postfix":      ("postfix", "postfix"),
+    "sendmail":     ("proofpoint", "sendmail"),
+    "dovecot":      ("dovecot", "dovecot"),
+    "proftpd":      ("proftpd", "proftpd"),
+    "vsftpd":       ("vsftpd", "vsftpd"),
+    "openldap":     ("openldap", "openldap"),
+    "samba":        ("samba", "samba"),
+    "bind":         ("isc", "bind"),
+    "openvas":      ("greenbone", "openvas"),
+    "webmin":       ("webmin", "webmin"),
+    "cpanel":       ("cpanel", "cpanel"),
 }
 
 # ─────────────────────────────────────────────
@@ -364,6 +411,105 @@ def _post_validate(report: ScanReport, raw_scan: str) -> ScanReport:
     return report
 
 
+_VULN_SPECIALIST_MAP: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(sql[i ]|sqli|sql injection|sqlmap|blind\s+sql)\b", re.I), "sqlmap"),
+    (re.compile(r"\b(xss|cross[-\s]?site\s+scripting|dalfox)\b",         re.I), "dalfox"),
+    (re.compile(r"\b(ssrf|server[-\s]?side\s+request)\b",                re.I), "ssrfmap"),
+    (re.compile(r"\b(ssti|template\s+injection|jinja|freemarker|twig)\b", re.I), "sstimap"),
+    (re.compile(r"\b(cmd[i ]|command\s+injection|os\s+injection|commix)\b", re.I), "commix"),
+    (re.compile(r"\b(lfi|path\s+traversal|file\s+inclusion|directory\s+traversal)\b", re.I), "lfi_probe"),
+    (re.compile(r"\b(idor|insecure\s+direct\s+object|broken\s+access)\b", re.I), "idor_probe"),
+]
+
+
+_SKIP_MARKERS_RE = re.compile(
+    r"\b(skipped|not\s+run|not\s+executed|failed|error|no\s+valid|inconclusive|unable\s+to)\b",
+    re.I,
+)
+
+
+def _pick_specialist(finding: Finding) -> str | None:
+    haystack = f"{finding.vuln_name} {finding.description}"
+    if _SKIP_MARKERS_RE.search(haystack):
+        return None
+    for pattern, tool in _VULN_SPECIALIST_MAP:
+        if pattern.search(haystack):
+            return tool
+    return None
+
+
+def _exploit_finding(finding: Finding, target: str) -> tuple[bool, str]:
+    """
+    Attempt actual exploitation for a Finding. Returns (flag_captured, evidence_string).
+    Time-boxed per tool; captures FLAG{...} markers in any exploit output.
+    """
+    tool = _pick_specialist(finding)
+    if not tool:
+        return False, ""
+
+    tgt_url = target if target.startswith(("http://", "https://")) else f"http://{target}"
+    if finding.port and finding.port not in ("80", "443", ""):
+        parsed_host = tgt_url.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
+        scheme = "https" if finding.port in ("443", "8443", "7443") else "http"
+        tgt_url = f"{scheme}://{parsed_host}:{finding.port}"
+
+    print(f"  [EXPLOIT-TRY] {tool} against '{finding.vuln_name}' at {tgt_url}")
+    try:
+        if tool == "sqlmap":
+            out = run_sqlmap(tgt_url, level=1, risk=1)
+        elif tool == "dalfox":
+            out = run_dalfox(tgt_url)
+        elif tool == "ssrfmap":
+            out = run_ssrfmap(tgt_url)
+        elif tool == "sstimap":
+            out = run_sstimap(tgt_url)
+        elif tool == "commix":
+            out = run_commix(tgt_url)
+        elif tool == "lfi_probe":
+            out = flag_hunt(tgt_url)
+        elif tool == "idor_probe":
+            out = flag_hunt(tgt_url)
+        else:
+            return False, ""
+    except Exception as e:
+        return False, f"[{tool} crashed: {e}]"
+
+    flags = FLAG_RE.findall(out)
+    if flags:
+        return True, f"[EXPLOIT-SUCCESS via {tool}] captured: {flags[0]}"
+    return False, f"[EXPLOIT-RUN via {tool}] no flag; output {len(out)} bytes"
+
+
+def _run_exploit_loop(report: ScanReport, target: str, max_attempts: int = 5) -> int:
+    """
+    Iterate findings, attempt real exploitation with matching specialist tool.
+    Time-boxed (max_attempts tools tried) to keep total scan under ~15 min.
+    Updates finding.description with [EXPLOIT-SUCCESS|EXPLOIT-RUN] annotations.
+    Returns count of flags captured.
+    """
+    attempted = 0
+    captured  = 0
+    seen_tools: set[str] = set()
+    priority_severity = ("critical", "high", "medium", "low", "info")
+    ordered = sorted(report.findings, key=lambda f: priority_severity.index(f.severity) if f.severity in priority_severity else 99)
+    for finding in ordered:
+        if attempted >= max_attempts:
+            break
+        tool = _pick_specialist(finding)
+        if not tool or tool in seen_tools:
+            continue
+        seen_tools.add(tool)
+        attempted += 1
+        got_flag, evidence = _exploit_finding(finding, target)
+        if evidence:
+            finding.description += f"\n{evidence}"
+        if got_flag:
+            captured += 1
+            finding.confidence = "confirmed"
+            finding.severity = "critical"
+    return captured
+
+
 # ─────────────────────────────────────────────
 # OLLAMA CALL WITH STRUCTURED OUTPUT
 # ─────────────────────────────────────────────
@@ -460,8 +606,30 @@ def analyse_target(target: str, raw_scan: str) -> dict:
             findings=[], exploits=[],
         )
 
-    # POST-VALIDATION: citations + NVD CVE grounding
     report = _post_validate(report, raw_scan)
+
+    recon_flags = set(FLAG_RE.findall(raw_scan))
+    if recon_flags:
+        print(f"  [FLAG-IN-RECON] {len(recon_flags)} flag marker(s) already leaked in recon output — no exploitation needed")
+        for flag in recon_flags:
+            report.findings.append(Finding(
+                vuln_name="Flag Leaked via Passive Recon",
+                severity="critical",
+                port="",
+                service="",
+                description=f"[FLAG-CAPTURED via flag_hunt/recon] {flag}",
+                fix="Remove flag file from web-accessible path.",
+                cve_id=None,
+                evidence_lines=[],
+                confidence="confirmed",
+                cvss_score=10.0,
+            ))
+        report.risk_level = "CRITICAL"
+    else:
+        captured = _run_exploit_loop(report, target, max_attempts=5)
+        if captured:
+            print(f"  [EXPLOIT-LOOP] captured {captured} flag(s) via specialist exploitation")
+            report.risk_level = "CRITICAL"
 
     print(f"\n[+] Parsed: {len(report.findings)} findings, {len(report.exploits)} exploits | Risk: {report.risk_level}")
     print(f"    confidence breakdown: " + ", ".join(

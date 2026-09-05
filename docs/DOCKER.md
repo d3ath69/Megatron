@@ -10,9 +10,9 @@ Quickstart: one `docker compose up` and you're scanning. This doc explains what 
 - **Ollama** installed on the host with at least one model pulled:
   ```bash
   curl -fsSL https://ollama.com/install.sh | sh
-  ollama pull qwen2.5:7b-instruct        # default
-  # optional: bigger/uncensored alternative
-  ollama pull hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M
+  ollama pull hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M   # default since v0.5.2 — 114 tok/s, uncensored, Claude-fine-tuned
+  # or the safer/older default:
+  ollama pull qwen2.5:7b-instruct                                          # 35 tok/s, more predictable
   ```
 - **NVIDIA GPU** (recommended) — Ollama uses it automatically once the NVIDIA driver is installed on the host. **You do not need `nvidia-container-toolkit`** because Ollama runs on the host, not in the container.
 - **Ports free**: MEGATRON's container publishes nothing by default. Ollama uses `11434` on the host.
@@ -70,17 +70,28 @@ All env vars have sensible lab defaults. Override in a `.env` file next to `dock
 | Var | Default | Effect |
 |---|---|---|
 | `OLLAMA_HOST` | `http://host.docker.internal:11434` | Where the container reaches Ollama. Change if Ollama is on a different LAN box. |
-| `MODEL_NAME` | `qwen2.5:7b-instruct` | Any Ollama-visible tag. See "Model swap" below. |
-| `MODEL_TEMPERATURE` | `0.1` | 0.0-0.3 = deterministic (recommended for schema output). Qwythos reasoning models need 0.4-0.6. |
-| `MODEL_THINK` | `false` | Ollama `think` param. Set `true` for reasoning models like Qwythos. |
+| `MODEL_NAME` | `hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M` | Any Ollama-visible tag. See "Model swap" below. |
+| `MODEL_TEMPERATURE` | `0.5` | 0.1 for `qwen2.5:7b-instruct` (deterministic). 0.5 for Qwythos (their docs warn T≤0.3 causes repetition loops). |
+| `MODEL_THINK` | `false` | Ollama `think` param. Set `true` only for reasoning models that explicitly need chain-of-thought. |
+| `OLLAMA_TIMEOUT` | `600` | Bump to `1200` if using 27B models or the exploit-execution loop times out on hard targets. |
+| `MEGATRON_MAX_LOOPS` | `6` | Cap on ReAct dispatch rounds (LLM tool-call ping-pongs). |
+| `AUTH_COOKIE` | *(unset)* | e.g. `sessionid=abc123; csrftoken=xyz` — threaded through httpx / nuclei / katana / feroxbuster / dalfox / flag-hunt for authenticated scans. |
+| `AUTH_HEADER` | *(unset)* | e.g. `Authorization: Bearer eyJhbGci...` — same threading. |
+| `NVD_API_KEY` | *(unset)* | Free at nvd.nist.gov — lifts NVD rate limit from 5→50 req/30s. |
 | `DB_HOST` | `mariadb` | Container hostname of the DB service (compose network). |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `megatron` / `123` / `megatron` | Change for anything past lab use. |
 
-Example `.env` for the Qwythos-9B swap:
+Example `.env` for the qwen2.5-instruct fallback (if Qwythos gives you trouble):
 ```env
-MODEL_NAME=hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M
-MODEL_TEMPERATURE=0.5
-MODEL_THINK=true
+MODEL_NAME=qwen2.5:7b-instruct
+MODEL_TEMPERATURE=0.1
+MODEL_THINK=false
+```
+
+Example `.env` for scanning a logged-in app (both cookie AND custom header):
+```env
+AUTH_COOKIE=sessionid=abc123; csrftoken=xyz789
+AUTH_HEADER=X-API-Key: sk_live_...
 ```
 
 Then `docker compose up -d && docker compose exec megatron python3 megatron.py`.
