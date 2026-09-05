@@ -30,8 +30,8 @@ services:
     tty: true
     environment:
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
-      MODEL_NAME: ${MODEL_NAME:-qwen2.5:7b-instruct}
-      MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-0.1}
+      MODEL_NAME: ${MODEL_NAME:-hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M}
+      MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-0.5}
       MODEL_THINK: ${MODEL_THINK:-false}
       DB_HOST: mariadb
       DB_PORT: "3306"

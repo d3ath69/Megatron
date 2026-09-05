@@ -60,10 +60,10 @@ _PRODUCT_ALIAS = {
 import os as _os
 
 OLLAMA_HOST     = _os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-MODEL_NAME      = _os.environ.get("MODEL_NAME", "qwen2.5:7b-instruct")
+MODEL_NAME      = _os.environ.get("MODEL_NAME", "hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M")
 MAX_TOOL_LOOPS  = int(_os.environ.get("MEGATRON_MAX_LOOPS", "6"))
 OLLAMA_TIMEOUT  = int(_os.environ.get("OLLAMA_TIMEOUT", "600"))
-_MODEL_TEMP     = float(_os.environ.get("MODEL_TEMPERATURE", "0.1"))
+_MODEL_TEMP     = float(_os.environ.get("MODEL_TEMPERATURE", "0.5"))
 _MODEL_THINK    = _os.environ.get("MODEL_THINK", "false").lower() in ("1", "true", "yes")
 
 _client = OllamaClient(host=OLLAMA_HOST, timeout=OLLAMA_TIMEOUT)
@@ -125,6 +125,37 @@ CORE RULES (violate any → the finding is invalid):
 - If evidence is thin, mark confidence="unconfirmed" and severity="low".
 - Only assign severity="critical" when there is direct evidence of exploitability
   (e.g., anonymous FTP write, unauthenticated RCE, exposed admin panel with default creds).
+
+REQUIRED FIELD FILLING — this is where most models fail:
+- `port`: fill from any nmap `NN/tcp open SERVICE` or naabu `open port NN` line. If the finding is
+  service-specific, this MUST be the numeric port as a string (e.g. "22", "443", "8080"). Only leave
+  empty when the finding is truly port-agnostic (e.g., a DNS-only finding).
+- `service`: fill from the SERVICE column of nmap output or the tech-detect field of httpx output
+  (e.g., "ssh", "http", "mysql", "nginx", "apache", "jetty"). Use the lower-case token.
+
+GOOD EXAMPLE of a well-filled finding:
+{
+  "vuln_name": "OpenSSH 8.9p1 Terrapin Attack (CVE-2023-48795)",
+  "severity": "medium",
+  "port": "22",
+  "service": "ssh",
+  "description": "OpenSSH 8.9p1 is affected by the Terrapin prefix truncation attack in the SSH transport protocol.",
+  "fix": "Upgrade to OpenSSH 9.6 or later, or disable ChaCha20-Poly1305 and *-etm@openssh.com MACs.",
+  "cve_id": "CVE-2023-48795",
+  "evidence_lines": [7],
+  "confidence": "likely",
+  "cvss_score": 5.9
+}
+
+BAD EXAMPLE (port + service left empty even though the recon clearly showed them):
+{
+  "vuln_name": "SSH service present",
+  "severity": "low",
+  "port": "",           ← WRONG: recon line 7 clearly said 22/tcp open ssh
+  "service": "",        ← WRONG: recon line 7 clearly said 22/tcp open ssh
+  "description": "SSH is running.",
+  ...
+}
 
 You will receive TOOL RESULTS labeled with line numbers. Cite them.
 You will output a single JSON object matching the ScanReport schema. No prose outside the JSON."""
@@ -206,12 +237,51 @@ def _extract_service_versions(raw_scan: str) -> list[tuple[str, str, str, str]]:
     return out
 
 
+def _fill_missing_ports(findings: list[Finding], raw_scan: str) -> int:
+    """
+    Backfill empty port/service fields by cross-referencing the LLM's finding
+    against services detected in raw_scan. Every model tested (qwen2.5, Qwythos)
+    leaves these blank sometimes; this makes filling a code guarantee.
+    """
+    services = _extract_service_versions(raw_scan)
+    if not services:
+        return 0
+    word_map: dict[str, tuple[str, str]] = {}
+    for port, svc_token, product, _ver in services:
+        for key in (svc_token.lower(), product.lower(), product.replace("_", " ").lower()):
+            word_map[key] = (port, svc_token)
+        common_aliases = {
+            "http_server": ("apache", "httpd"),
+            "openssh":     ("openssh", "ssh"),
+            "unifi_network_application": ("unifi",),
+            "vcenter_server": ("vcenter", "vsphere"),
+        }
+        for extra in common_aliases.get(product, ()):
+            word_map[extra] = (port, svc_token)
+    filled = 0
+    for f in findings:
+        if f.port and f.service:
+            continue
+        haystack = f"{f.vuln_name} {f.description}".lower()
+        for word, (port, svc) in word_map.items():
+            if len(word) >= 3 and word in haystack:
+                if not f.port:
+                    f.port = port
+                    filled += 1
+                if not f.service:
+                    f.service = svc
+                break
+    return filled
+
+
 def _post_validate(report: ScanReport, raw_scan: str) -> ScanReport:
     """
     Enforce grounding + proactively inject NVD-known CVEs:
       1) evidence_lines that don't exist in raw_scan → downgrade confidence
       2) LLM-claimed CVEs → verify via NVD; strip + downgrade if not found
-      3) NVD service+version lookup for products in the scan → inject grounded
+      3) Backfill missing port/service from raw_scan service map (models often
+         leave these empty; code fallback beats prompt-only fixes)
+      4) NVD service+version lookup for products in the scan → inject grounded
          Findings for CVEs the LLM was too conservative to claim (CPTC scoring win)
     """
     raw_lines = raw_scan.splitlines()
@@ -285,6 +355,10 @@ def _post_validate(report: ScanReport, raw_scan: str) -> ScanReport:
             injected += 1
     if injected:
         print(f"  [NVD-INJECT] added {injected} grounded CVE(s) from product+version lookup.")
+
+    n_backfilled = _fill_missing_ports(verified_findings, raw_scan)
+    if n_backfilled:
+        print(f"  [PORT-BACKFILL] filled port/service on {n_backfilled} LLM finding(s) via service-map lookup.")
 
     report.findings = verified_findings
     return report
