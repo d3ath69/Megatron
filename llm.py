@@ -23,9 +23,16 @@ from ollama import Client as OllamaClient
 from tools import (
     run_tool_by_command,
     run_sqlmap, run_dalfox, run_ssrfmap, run_sstimap, run_commix,
-    flag_hunt, FLAG_RE,
+    flag_hunt, FLAG_RE, WEB_SUSPECT_PORTS,
 )
 from search import handle_search_dispatch, verify_cve_nvd, nvd_search_by_product
+
+try:
+    from browser_agent import BrowserSession, looks_like_login_page, looks_like_register_page
+    _BROWSER_AVAILABLE = True
+except ImportError:
+    _BROWSER_AVAILABLE = False
+    BrowserSession = None  # type: ignore
 
 _SERVICE_VERSION_RE = re.compile(
     r"^\s*(\d+)/(?:tcp|udp)\s+open\s+(\S+)\s+(.+?)(?:\s+syn-ack.*)?$",
@@ -480,18 +487,150 @@ def _exploit_finding(finding: Finding, target: str) -> tuple[bool, str]:
     return False, f"[EXPLOIT-RUN via {tool}] no flag; output {len(out)} bytes"
 
 
+ActionType = Literal["navigate", "click", "fill", "submit", "wait", "screenshot", "done"]
+
+
+class BrowserAction(BaseModel):
+    """One atomic action the LLM proposes for the persistent browser session."""
+    type:     ActionType = Field(..., description="One of: navigate, click, fill, submit, wait, screenshot, done")
+    selector: str        = Field("", description="CSS selector from observed forms/inputs/buttons/links. MUST come from observed set — don't invent.")
+    value:    str        = Field("", description="Value for `fill`; URL for `navigate`; empty otherwise")
+    reason:   str        = Field(..., description="One sentence: why this action, what vuln you're proving, what you expect next")
+
+
+class BrowserPlan(BaseModel):
+    """LLM output for one iteration of the browser-exploit loop."""
+    action:             BrowserAction
+    flag_candidate:     str | None = Field(None, description="If FLAG{...} spotted in visible text, put it here")
+    exploit_hypothesis: str        = Field(..., description="What vulnerability/chain you're currently trying to prove")
+    give_up:            bool       = Field(False, description="True if you're truly stuck; will exit the loop")
+
+
+def _build_url_for_finding(target: str, finding: Finding) -> str:
+    """Assemble http(s)://host:port from target + finding.port."""
+    if target.startswith(("http://", "https://")):
+        base = target
+    else:
+        base = f"http://{target}"
+    if finding.port and finding.port not in ("", "80"):
+        scheme = "https" if finding.port in ("443", "8443", "7443", "9443") else "http"
+        host = base.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
+        base = f"{scheme}://{host}:{finding.port}"
+    return base
+
+
+def _browser_exploit(target_url: str, finding: Finding, max_actions: int = 15) -> tuple[bool, str]:
+    """
+    LLM-driven browser exploit loop. Persistent Chromium session; observe → plan → act.
+    Time-boxed to `max_actions`. Every observation is regex-scanned for FLAG{...} first
+    (fast path — no LLM call needed if flag is already visible).
+
+    MEGATRON differentiator vs Shannon: even a partial exploit chain that dumps the
+    session cookie is exported to CLI specialists (sqlmap, curl) as a second pass.
+    """
+    if not _BROWSER_AVAILABLE:
+        return False, "[browser-exploit] SKIPPED — playwright not installed"
+
+    try:
+        with BrowserSession(target_url, headless=True, timeout_ms=8000) as sess:
+            history: list[dict] = []
+            action_dedup: set[tuple[str, str, str]] = set()
+
+            for step in range(max_actions):
+                snap = sess.observe(max_visible=1500, max_links=20)
+                if "error" in snap:
+                    return False, f"[browser-exploit] observe failed: {snap['error']}"
+
+                visible = snap.get("visible_text", "")
+                title   = snap.get("title", "")
+                flags = FLAG_RE.findall(visible + " " + title)
+                if flags:
+                    return True, f"[BROWSER-EXPLOIT captured] {flags[0]} after {step} action(s) at {snap['url']}"
+
+                trimmed_snap = {
+                    "url":     snap["url"],
+                    "title":   title,
+                    "forms":   snap.get("forms", [])[:5],
+                    "inputs":  snap.get("inputs", [])[:10],
+                    "buttons": snap.get("buttons", [])[:8],
+                    "links":   snap.get("links", [])[:15],
+                    "visible_text_head": visible[:600],
+                    "visible_text_tail": visible[-400:] if len(visible) > 1000 else "",
+                }
+                prompt = (
+                    f"You are exploiting a web app to capture the flag (format: FLAG{{...}}).\n\n"
+                    f"TARGET: {target_url}\n"
+                    f"FINDING TO EXPLOIT: {finding.vuln_name}\n"
+                    f"  severity={finding.severity} confidence={finding.confidence}\n"
+                    f"  description: {finding.description[:400]}\n\n"
+                    f"PROGRESS SO FAR (last 4 actions):\n{json.dumps(history[-4:], indent=1) if history else '  (none yet — first action)'}\n\n"
+                    f"CURRENT PAGE STATE:\n{json.dumps(trimmed_snap, indent=1)}\n\n"
+                    f"Propose the NEXT single action. Rules:\n"
+                    f"  - selectors MUST come from observed forms/inputs/buttons/links (don't invent CSS)\n"
+                    f"  - if you spot FLAG{{...}} in visible text, set flag_candidate\n"
+                    f"  - common payloads: SQLi=' OR 1=1--, SSTI={{{{7*7}}}}, XSS=<script>alert(1)</script>, LFI=../../../../etc/passwd\n"
+                    f"  - IDOR: try incrementing numeric IDs in URLs or params\n"
+                    f"  - if stuck after 3+ actions with no progress, set give_up=true"
+                )
+                plan = _ask_structured_typed(prompt, BrowserPlan)
+                if plan is None or plan.give_up or plan.action.type == "done":
+                    break
+                if plan.flag_candidate and FLAG_RE.match(plan.flag_candidate):
+                    return True, f"[BROWSER-EXPLOIT captured] {plan.flag_candidate} via LLM inspection at step {step}"
+
+                key = (plan.action.type, plan.action.selector, plan.action.value)
+                if key in action_dedup:
+                    history.append({"step": step, "skipped": "duplicate action", "action": plan.action.model_dump()})
+                    continue
+                action_dedup.add(key)
+
+                result = sess.act(plan.action.model_dump())
+                history.append({"step": step, "action": plan.action.model_dump(), "result": result, "reason": plan.action.reason})
+
+            return False, f"[browser-exploit] no flag after {len(history)} action(s) on '{finding.vuln_name}'"
+    except Exception as e:
+        return False, f"[browser-exploit] session error: {str(e)[:200]}"
+
+
+def _ask_structured_typed(prompt: str, schema_class):
+    """One-shot structured call to Ollama for an arbitrary Pydantic schema."""
+    try:
+        resp = _client.chat(
+            model    = MODEL_NAME,
+            messages = [{"role": "user", "content": prompt}],
+            format   = schema_class.model_json_schema(),
+            think    = _MODEL_THINK,
+            options  = {"temperature": _MODEL_TEMP, "top_p": 0.9, "top_k": 20, "num_ctx": 16384, "num_predict": 4096},
+        )
+        content = resp["message"]["content"]
+        return schema_class.model_validate_json(content)
+    except Exception as e:
+        print(f"  [!] structured-typed call failed: {str(e)[:150]}")
+        return None
+
+
 def _run_exploit_loop(report: ScanReport, target: str, max_attempts: int = 5) -> int:
     """
-    Iterate findings, attempt real exploitation with matching specialist tool.
-    Time-boxed (max_attempts tools tried) to keep total scan under ~15 min.
-    Updates finding.description with [EXPLOIT-SUCCESS|EXPLOIT-RUN] annotations.
-    Returns count of flags captured.
+    Multi-tier exploitation loop (MEGATRON differentiator vs Shannon):
+      Tier 1: Fast CLI specialist per vuln class (sqlmap/dalfox/SSRFmap/etc)
+      Tier 2: Browser-driven LLM exploit loop (slower but handles chained flows)
+              — runs FIRST for web findings when playwright is available,
+                because browser can capture IDOR/auth flows CLI can't
+      Tier 3: (planned) cross-finding correlation for exploit chains
+
+    First tool to capture a flag wins for that finding; findings without
+    matched exploits stay unchanged. Time-boxed to `max_attempts` total.
     """
     attempted = 0
     captured  = 0
     seen_tools: set[str] = set()
     priority_severity = ("critical", "high", "medium", "low", "info")
-    ordered = sorted(report.findings, key=lambda f: priority_severity.index(f.severity) if f.severity in priority_severity else 99)
+    ordered = sorted(
+        report.findings,
+        key=lambda f: priority_severity.index(f.severity) if f.severity in priority_severity else 99,
+    )
+    web_port_strs = {str(p) for p in WEB_SUSPECT_PORTS}
+
     for finding in ordered:
         if attempted >= max_attempts:
             break
@@ -500,13 +639,27 @@ def _run_exploit_loop(report: ScanReport, target: str, max_attempts: int = 5) ->
             continue
         seen_tools.add(tool)
         attempted += 1
-        got_flag, evidence = _exploit_finding(finding, target)
-        if evidence:
-            finding.description += f"\n{evidence}"
+
+        is_web = (finding.port in web_port_strs) or (finding.port == "" and tool in ("dalfox", "lfi_probe", "idor_probe"))
+        got_flag, evidence = False, ""
+
+        if is_web and _BROWSER_AVAILABLE:
+            print(f"  [EXPLOIT-BROWSER] driving Chromium against '{finding.vuln_name}'")
+            got_flag, evidence = _browser_exploit(_build_url_for_finding(target, finding), finding)
+            if evidence:
+                finding.description += f"\n{evidence}"
+
+        if not got_flag:
+            got_flag2, evidence2 = _exploit_finding(finding, target)
+            if evidence2:
+                finding.description += f"\n{evidence2}"
+            got_flag = got_flag or got_flag2
+
         if got_flag:
             captured += 1
             finding.confidence = "confirmed"
             finding.severity = "critical"
+
     return captured
 
 

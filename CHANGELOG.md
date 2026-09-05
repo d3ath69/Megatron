@@ -6,6 +6,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [0.7.0] — 2026-09-05
+
+**Browser-driven exploit loop (Playwright) + multi-tier ensemble + critical host:port bug fix.**
+
+### Added
+- **`browser_agent.py`** — new module. `BrowserSession` class provides persistent Chromium session (context survives across actions), auth-cookie/header threading, `observe()` → compact JSON snapshot with real DOM selectors, `act()` → one atomic action + wait for network idle. Docker-safe (`--no-sandbox`). Graceful ImportError if playwright not installed.
+- **`_browser_exploit()`** in llm.py — LLM ↔ browser dialog loop. 15-action max. Every observation regex-scanned for FLAG{...} (fast path). Action-history dedup prevents loops. Uses new `BrowserAction`/`BrowserPlan` Pydantic schemas — selectors MUST come from observed set (Pydantic-enforced anti-hallucination).
+- **`_ask_structured_typed()`** — reusable single-shot Ollama structured call for arbitrary Pydantic schemas.
+- **Multi-tier ensemble in `_run_exploit_loop`** — Tier 1: browser loop for web findings + playwright available. Tier 2: CLI specialist (sqlmap/dalfox/etc) as fallback. First to capture flag wins.
+- **Playwright + Chromium in Dockerfile** — image adds ~200MB (2.28 GB → ~2.5 GB). `requirements.txt` now includes `playwright>=1.47.0`.
+- **Login/register page detection helpers** — `looks_like_login_page()`, `looks_like_register_page()` for future auth-flow bootstrap.
+- **`docs/RELEASE_NOTES_v0.7.0.md`** with honest before/after XBOW numbers + Shannon comparison matrix.
+
+### Fixed
+- **CRITICAL: `_tcp_verify(target, port)` was silently breaking on `host:port` targets.** `socket.create_connection(("127.0.0.1:32785", 32785))` is a garbage tuple that always failed → all XBOW challenges (docker dynamic ports) returned 0 verified ports → **entire web pipeline was skipped** (httpx, nuclei-kev, katana, feroxbuster, dalfox, flag_hunt all silently no-op'd). Fix: `_hostname_only(target)` strip in `_tcp_verify` + `run_nmap` + `run_nmap_udp_top100` + `run_nmap_targeted`. Also added explicit-port short-circuit in `run_recon_pipeline` — if target has `:port` already, skip naabu sweep and use that port directly.
+- **`_hostname_only()` now stripped from all nmap wrappers** — nmap treats `host:port` as `host:port_range_spec` and misfires.
+
+### Verified XBOW v0.7.0 baseline (5 L1 challenges)
+- 5 challenges run, 15 findings, **0 flags captured** (still — need auth-flow bootstrap + session-aware planning)
+- **Severity distribution IMPROVED**: 2 CRITICAL + 3 HIGH findings (v0.6.0 had 0 of each on same challenges). Browser loop confirming evidence.
+- Avg scan time 82s → **734s** (browser exploration costs)
+- Full analysis in docs/RELEASE_NOTES_v0.7.0.md
+
+### MEGATRON differentiators vs Shannon
+- 100% local Ollama (Shannon needs Anthropic API)
+- $0 per scan (Shannon: ~$1-5)
+- Works black-box AND white-box (Shannon: white-box only)
+- Ground-truth NVD verification on every CVE claim
+- Proactive NVD product+version injection (65 aliases)
+- 40 WAF signatures fingerprinted
+- Multi-tier fallback (browser → CLI → curl-craft)
+- GPL-3.0 open source
+- One-command `docker compose up` install
+- Shannon still wins on: XBOW flag capture rate (needs source-aware exec, out of black-box scope)
+
+---
+
 ## [0.6.0] — 2026-09-05
 
 **Auth passthrough + flag-hunt phase + exploit-execution loop + polished docs.**

@@ -79,17 +79,17 @@ def run_tool(command: list, timeout: int = 120) -> str:
 # ─────────────────────────────────────────────
 
 def run_nmap(target: str) -> str:
-    """
-    nmap -sV -sC -T3 --open  (softer than -T4; T4 DoSes fragile CTF hosts)
-    """
-    print(f"  [*] nmap -sV -sC -T3 --open {target}")
-    return run_tool(["nmap", "-sV", "-sC", "-T3", "--open", target], timeout=300)
+    """nmap -sV -sC -T3 --open  (softer than -T4; T4 DoSes fragile CTF hosts)."""
+    host = _hostname_only(target)
+    print(f"  [*] nmap -sV -sC -T3 --open {host}")
+    return run_tool(["nmap", "-sV", "-sC", "-T3", "--open", host], timeout=300)
 
 
 def run_nmap_udp_top100(target: str) -> str:
     """UDP top-100 sweep — catches SNMP/DNS/TFTP/IPMI/NetBIOS-name."""
-    print(f"  [*] nmap -sU --top-ports 100 -T3 --open {target}")
-    return run_tool(["nmap", "-sU", "--top-ports", "100", "-T3", "--open", target], timeout=600)
+    host = _hostname_only(target)
+    print(f"  [*] nmap -sU --top-ports 100 -T3 --open {host}")
+    return run_tool(["nmap", "-sU", "--top-ports", "100", "-T3", "--open", host], timeout=600)
 
 
 def run_whois(target: str) -> str:
@@ -138,9 +138,13 @@ def _tcp_verify(target: str, port: int, timeout: float = 3.0) -> bool:
          where the kernel's TCP semantics interact oddly with docker's user-mode
          proxy (loopback publishing can look "filtered" to a raw socket but serve
          HTTP fine). Bug seen v0.5.2 XBOW baseline on 127.0.0.1:32770.
+
+    NOTE: `target` may include a `:port` suffix (from host:port scan targets).
+    We MUST strip it before socket/curl calls to avoid malformed connections.
     """
+    host = _hostname_only(target)
     try:
-        with socket.create_connection((target, port), timeout=timeout):
+        with socket.create_connection((host, port), timeout=timeout):
             return True
     except (socket.timeout, ConnectionRefusedError, OSError):
         pass
@@ -149,7 +153,7 @@ def _tcp_verify(target: str, port: int, timeout: float = 3.0) -> bool:
     for scheme in ("http", "https"):
         r = subprocess.run(
             ["curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
-             "--max-time", "3", f"{scheme}://{target}:{port}/"],
+             "--max-time", "3", f"{scheme}://{host}:{port}/"],
             capture_output=True, text=True, timeout=5,
         )
         if r.stdout.strip().isdigit() and int(r.stdout.strip()) > 0:
@@ -259,14 +263,16 @@ def _naabu_extract_verified_ports(target: str, top_ports: str = "1000") -> tuple
 def run_nmap_targeted(target: str, ports: list[int]) -> str:
     """
     Deep nmap (-sV -sC) restricted to a pre-discovered port list.
-    Used as stage 2 after naabu sweep.
+    Used as stage 2 after naabu sweep. Strips :port suffix from target
+    (nmap treats `host:port` as `host:port_range_spec` and misfires).
     """
     if not ports:
         return "[nmap-targeted] naabu found no ports — skipping deep scan."
+    host = _hostname_only(target)
     port_arg = ",".join(map(str, ports))
-    print(f"  [*] nmap -sV -sC -T3 -p {port_arg} {target}")
+    print(f"  [*] nmap -sV -sC -T3 -p {port_arg} {host}")
     return run_tool(
-        ["nmap", "-sV", "-sC", "-T3", "-p", port_arg, target],
+        ["nmap", "-sV", "-sC", "-T3", "-p", port_arg, host],
         timeout=600,
     )
 
@@ -335,28 +341,43 @@ def run_nuclei_kev(target: str) -> str:
 def run_recon_pipeline(target: str) -> dict:
     """
     Ground-truth CPTC-flavored recon pipeline:
-      1) naabu fast TCP sweep
+      1) naabu fast TCP sweep — or short-circuit if target already has :port
       2) TCP-handshake reconciliation (drop naabu false positives)
       3) nmap -sV -sC on verified ports
       4) nmap UDP top-100 (SNMP/DNS/TFTP/IPMI/NetBIOS)
       5) TLS cert grab on every TLS-suspect port that verified
       6) SSH banner probe if port 22 verified (real SSH / tarpit / proxy)
-      7) httpx + nuclei-kev if any web port verified
+      7) httpx + nuclei-kev + WAF + katana + feroxbuster + dalfox + flag-hunt
+         if any web port verified
       8) dig + whois for asset context
+      9) schemathesis if OpenAPI auto-detected
+      10) subfinder if target is a domain
     """
     print(f"\n[*] MEGATRON pipeline recon on {target}")
     print("─" * 60)
     results: dict[str, str] = {}
+    _host, explicit_port = _host_and_port(target)
 
-    verified, filtered = _naabu_extract_verified_ports(target, "1000")
-    summary = (
-        f"Verified open TCP ports ({len(verified)}): {','.join(map(str, verified)) or 'none'}\n"
-        f"Naabu false positives filtered ({len(filtered)}): "
-        f"{','.join(map(str, filtered)) or 'none'}"
-    )
-    results["naabu_summary"] = summary
-    print(f"  [naabu-verify] {len(verified)} real, {len(filtered)} filtered "
-          f"{'(' + ','.join(map(str, filtered)) + ')' if filtered else ''}")
+    if explicit_port is not None:
+        if _tcp_verify(target, explicit_port):
+            verified, filtered = [explicit_port], []
+            summary = f"Explicit target port {explicit_port} verified (skipped naabu sweep)."
+        else:
+            verified, filtered = [], [explicit_port]
+            summary = f"Explicit target port {explicit_port} FAILED both TCP + HTTP verification."
+        results["naabu_summary"] = summary
+        print(f"  [explicit-port] using {explicit_port}: "
+              f"{'verified' if verified else 'FAILED verify'}")
+    else:
+        verified, filtered = _naabu_extract_verified_ports(target, "1000")
+        summary = (
+            f"Verified open TCP ports ({len(verified)}): {','.join(map(str, verified)) or 'none'}\n"
+            f"Naabu false positives filtered ({len(filtered)}): "
+            f"{','.join(map(str, filtered)) or 'none'}"
+        )
+        results["naabu_summary"] = summary
+        print(f"  [naabu-verify] {len(verified)} real, {len(filtered)} filtered "
+              f"{'(' + ','.join(map(str, filtered)) + ')' if filtered else ''}")
 
     results["nmap_deep"] = run_nmap_targeted(target, verified)
     results["nmap_udp"]  = run_nmap_udp_top100(target)
@@ -374,7 +395,11 @@ def run_recon_pipeline(target: str) -> dict:
     else:
         results["ssh_probe"] = "[skipped] port 22 not in verified list"
 
-    if any(p in WEB_SUSPECT_PORTS for p in verified):
+    is_web_target = (
+        any(p in WEB_SUSPECT_PORTS for p in verified)
+        or (explicit_port is not None and explicit_port in verified)
+    )
+    if is_web_target:
         results["httpx"]        = run_httpx(target)
         results["nuclei_kev"]   = run_nuclei_kev(target)
         results["waf_detect"]   = detect_waf(target)
@@ -391,7 +416,7 @@ def run_recon_pipeline(target: str) -> dict:
     else:
         results["subfinder"] = "[skipped] target is an IP, not a domain"
 
-    if any(p in WEB_SUSPECT_PORTS for p in verified):
+    if is_web_target:
         api_spec = _find_openapi_spec(target)
         if api_spec:
             results["schemathesis"] = run_schemathesis(api_spec)

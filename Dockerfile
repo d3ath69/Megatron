@@ -70,7 +70,8 @@ COPY requirements.txt ./
 RUN python3 -m venv venv \
     && ./venv/bin/pip install --upgrade pip \
     && ./venv/bin/pip install --no-cache-dir -r requirements.txt \
-    && ./venv/bin/pip install --no-cache-dir sqlmap sstimap schemathesis semgrep
+    && ./venv/bin/pip install --no-cache-dir sqlmap sstimap schemathesis semgrep playwright \
+    && ./venv/bin/playwright install chromium --with-deps
 
 COPY . .
 
