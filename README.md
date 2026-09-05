@@ -165,6 +165,8 @@ Rewrite / rebrand as MEGATRON by **[d3ath69](https://github.com/d3ath69)** — s
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPL-3.0 — see [LICENSE](LICENSE).
+
+Upstream [sooryathejas/METATRON](https://github.com/sooryathejas/METATRON) is MIT-licensed; MIT → GPL is a compatible upgrade, so MEGATRON is redistributed under GPL with the original MIT copyright preserved in attribution.
 
 **⚠️ For authorized testing only.** Unauthorized scanning is illegal in most jurisdictions. You are solely responsible for compliance with all applicable laws and terms of service.
