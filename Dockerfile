@@ -26,21 +26,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt/pd-installs
 
 RUN set -eux; \
-    for name in naabu subfinder katana; do \
-      URL=$(curl -sL "https://api.github.com/repos/projectdiscovery/${name}/releases/latest" \
-            | grep browser_download_url | grep linux_amd64.zip | grep -v arm | head -1 | cut -d'"' -f4); \
-      curl -sL -o "${name}.zip" "$URL"; \
-      unzip -q -o "${name}.zip"; \
-      install -m 0755 "${name}" /usr/local/bin/; \
-    done; \
-    URL=$(curl -sL https://api.github.com/repos/projectdiscovery/httpx/releases/latest \
-          | grep browser_download_url | grep linux_amd64.zip | grep -v arm | head -1 | cut -d'"' -f4); \
-    curl -sL -o httpx.zip "$URL"; unzip -q -o httpx.zip; \
-    install -m 0755 httpx /usr/local/bin/httpx-pd; \
-    URL=$(curl -sL https://api.github.com/repos/projectdiscovery/nuclei/releases/latest \
-          | grep browser_download_url | grep linux_amd64.zip | grep -v arm | head -1 | cut -d'"' -f4); \
-    curl -sL -o nuclei.zip "$URL"; unzip -q -o nuclei.zip; \
-    install -m 0755 nuclei /usr/local/bin/; \
+    curl -sL -o naabu.zip     "https://github.com/projectdiscovery/naabu/releases/download/v2.6.1/naabu_2.6.1_linux_amd64.zip"; \
+    unzip -q -o naabu.zip;     install -m 0755 naabu     /usr/local/bin/; \
+    curl -sL -o subfinder.zip "https://github.com/projectdiscovery/subfinder/releases/download/v2.16.0/subfinder_2.16.0_linux_amd64.zip"; \
+    unzip -q -o subfinder.zip; install -m 0755 subfinder /usr/local/bin/; \
+    curl -sL -o katana.zip    "https://github.com/projectdiscovery/katana/releases/download/v1.7.0/katana_1.7.0_linux_amd64.zip"; \
+    unzip -q -o katana.zip;    install -m 0755 katana    /usr/local/bin/; \
+    curl -sL -o httpx.zip     "https://github.com/projectdiscovery/httpx/releases/download/v1.10.0/httpx_1.10.0_linux_amd64.zip"; \
+    unzip -q -o httpx.zip;     install -m 0755 httpx     /usr/local/bin/httpx-pd; \
+    curl -sL -o nuclei.zip    "https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip"; \
+    unzip -q -o nuclei.zip;    install -m 0755 nuclei    /usr/local/bin/; \
     nuclei -update-templates -silent || true
 
 RUN set -eux; \
@@ -49,19 +44,12 @@ RUN set -eux; \
     rm dalfox.deb; \
     curl -sL -o ferox.zip "https://github.com/epi052/feroxbuster/releases/latest/download/x86_64-linux-feroxbuster.zip"; \
     unzip -q -o ferox.zip; install -m 0755 feroxbuster /usr/local/bin/; \
-    for pd in trufflesecurity/trufflehog dwisiswant0/crlfuzz sensepost/gowitness; do \
-      base=$(basename "$pd"); \
-      URL=$(curl -sL "https://api.github.com/repos/${pd}/releases/latest" \
-            | grep browser_download_url \
-            | grep -iE "linux.*(amd64|x86_64)" \
-            | grep -v arm | grep -viE "sha|sig" | head -1 | cut -d'"' -f4); \
-      curl -sL -o "${base}_pkg" "$URL"; \
-      case "$URL" in \
-        *.tar.gz|*.tgz) tar -xzf "${base}_pkg"; install -m 0755 "$base" /usr/local/bin/;; \
-        *.zip)          unzip -q -o "${base}_pkg"; install -m 0755 "$base" /usr/local/bin/;; \
-        *)              chmod +x "${base}_pkg"; install -m 0755 "${base}_pkg" "/usr/local/bin/${base}";; \
-      esac; \
-    done; \
+    curl -sL -o trufflehog.tgz "https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.4/trufflehog_3.97.4_linux_amd64.tar.gz"; \
+    tar -xzf trufflehog.tgz; install -m 0755 trufflehog /usr/local/bin/; \
+    curl -sL -o crlfuzz.tgz "https://github.com/dwisiswant0/crlfuzz/releases/download/v1.4.1/crlfuzz_1.4.1_linux_amd64.tar.gz"; \
+    tar -xzf crlfuzz.tgz; install -m 0755 crlfuzz /usr/local/bin/; \
+    curl -sL -o gowitness "https://github.com/sensepost/gowitness/releases/download/3.1.1/gowitness-3.1.1-linux-amd64"; \
+    chmod +x gowitness; install -m 0755 gowitness /usr/local/bin/gowitness; \
     apt-get clean && rm -rf /var/lib/apt/lists/* /opt/pd-installs/*
 
 RUN git clone --depth 1 https://github.com/commixproject/commix.git /opt/commix \

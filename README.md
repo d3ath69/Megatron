@@ -40,7 +40,14 @@ Naabu-verify (TCP handshake reconciliation) · TLS cert grabber (openssl s_clien
 `gowitness` (screenshots) · `testssl.sh` (deep TLS audit) · MariaDB persistence · ReportLab PDF/HTML export
 
 **LLM**
-Ollama (default `qwen2.5:7b-instruct` on 8GB VRAM — ~35 tok/s; scales to 27B on 24GB VRAM). Pluggable via `MODEL_NAME` in `llm.py`. `think=False` + `temperature=0.1` for deterministic structured extraction.
+Two well-supported models, pick via `MODEL_NAME` env var:
+
+| Model | Size | Speed on RTX 3070 | Notes |
+|---|---|---|---|
+| `qwen2.5:7b-instruct` (default) | 4.7 GB | ~35 tok/s | Stable, well-tested, safe defaults (temp 0.1, think=false) |
+| `hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M` (recommended for CPTC) | 5.6 GB | **~114 tok/s** ★ | Uncensored, Claude-fine-tuned, 1M context, native function calling. Use `MODEL_TEMPERATURE=0.5 MODEL_THINK=false`. |
+
+Docker: pass any of `MODEL_NAME` / `MODEL_TEMPERATURE` / `MODEL_THINK` / `OLLAMA_TIMEOUT` in a `.env` file. Bare-metal: `export` before `python megatron.py`. See [docs/DOCKER.md](docs/DOCKER.md) and [docs/INSTALL.md](docs/INSTALL.md).
 
 ---
 
@@ -89,9 +96,17 @@ Optional PDF / HTML export via ReportLab
 
 ---
 
-## Install (Ubuntu 24.04 / Parrot OS)
+## Install
 
-Full step-by-step is in [docs/INSTALL.md](docs/INSTALL.md). Quick summary:
+**Fast path — Docker (recommended):**
+```bash
+git clone git@github.com:d3ath69/Megatron.git && cd Megatron
+docker compose up -d --build
+docker compose exec megatron python3 megatron.py
+```
+Full Docker docs: [docs/DOCKER.md](docs/DOCKER.md).
+
+**Bare metal — Ubuntu 24.04 / Parrot OS.** Full step-by-step is in [docs/INSTALL.md](docs/INSTALL.md). Quick summary:
 
 ```bash
 git clone git@github.com:d3ath69/Megatron.git ~/Megatron
