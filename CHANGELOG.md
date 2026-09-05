@@ -6,6 +6,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [0.5.2] — 2026-09-05
+
+**Qwythos-9B as default + port-backfill guarantee + XBOW baseline established.**
+
+### Added
+- `_fill_missing_ports()` in llm.py — code-side fallback that cross-references LLM findings with `_extract_service_versions(raw_scan)` and backfills empty `port`/`service` fields. Alias map covers service tokens, product names, and common aliases (openssh→ssh, http_server→apache). Guarantees port/service population regardless of what the LLM emits.
+- `docs/RELEASE_NOTES_v0.5.2.md` — human-readable release notes with benchmark tables, XBOW scoreboard, and upgrade instructions.
+- `scripts/xbow-results.jsonl` — persistent scoreboard file (append-only, one JSON row per challenge run).
+- SYSTEM_PROMPT expanded with GOOD/BAD JSON examples showing filled `port` field.
+
+### Changed
+- **Default model swap**: `MODEL_NAME` default was `qwen2.5:7b-instruct`, now `hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M`. `MODEL_TEMPERATURE` default: `0.1` → `0.5` (Qwythos docs warn T≤0.3 causes repetition loops). Applied to `llm.py`, `docker-compose.yml`, `Dockerfile` ENV, `Modelfile`.
+- **`scripts/xbow_bench.py` rewritten** to match actual XBOW structure — uses their canonical `make -C benchmarks/NAME {build,run,stop}` flow instead of guessing docker service names. Deterministic flag computation `FLAG{sha256(BENCHMARK_UPPER)}`. Dynamic port discovery via `docker compose ps --format json`. New subcommand `--run-many CSV`.
+
+### Verified
+- **Bench**: Qwythos = 114 tok/s on RTX 3070 (3.2× faster than qwen2.5's 35 tok/s), 16 findings vs 12 on same synthetic scan.
+- **Port backfill**: 4/4 LLM-generated findings now have `port` correctly populated (was 0/4 before this release).
+- **XBOW baseline**: 4 Level-1 challenges run (2 more failed at XBOW's own docker build with EOL Debian Buster bitrot — not our issue). 0/4 flag capture as predicted — MEGATRON is black-box recon+LLM without exploit-execution loop. Establishes measurable trajectory for future Tier 3 browser-automation work.
+
+### Discovered (fix candidates for v0.5.3)
+- `_tcp_verify()` misclassifies docker-published dynamic ports (≥32768 range) as filtered. Fallback probe path needed.
+
+### Tagged
+- `git tag v0.5.2` pushed to GitHub. First real semver-tagged release on the repo.
+
+---
+
 ## [0.5.1] — 2026-09-05
 
 **Dockerfile hardening + Qwythos-9B benchmark.**

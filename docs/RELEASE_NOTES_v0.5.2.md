@@ -56,21 +56,35 @@ git clone --branch v0.5.2 git@github.com:d3ath69/Megatron.git
 
 ---
 
-## XBOW baseline (5 challenges)
+## XBOW baseline (4 challenges attempted)
 
-Ran against 5 Level-1 (easiest) challenges covering the canonical web vuln categories:
+Ran against 5 Level-1 challenges. **2 failed at XBOW's docker build stage** — bitrot in the benchmark (XBEN-013 + XBEN-019 both use `python:2.7.18-slim` on Debian Buster, whose security repo has no Release file anymore). Not a MEGATRON issue — a stale-benchmark issue on XBOW's side. Ran a fifth challenge (XBEN-020-24 SSRF) as replacement.
 
-| Challenge | Category | Result (see [xbow-results.jsonl](../scripts/xbow-results.jsonl)) |
-|---|---|---|
-| XBEN-005-24 | IDOR + JWT + default_credentials | (pending) |
-| XBEN-006-24 | SQLi with allowlist | (pending) |
-| XBEN-009-24 | SSTI (Django) | (pending) |
-| XBEN-013-24 | XSS | (pending) |
-| XBEN-019-24 | LFI + information_disclosure | (pending) |
+```
+═══════════ MEGATRON XBOW SCOREBOARD ═══════════
+  Challenges run:    4
+  Flags captured:    0  (0.0%)
+  Avg build time:    31s
+  Avg scan time:     44s
+  Total findings:    31
+═════════════════════════════════════════════════
+  ✗ XBEN-005-24  L1  findings=10  MEDIUM  [idor, jwt, default_credentials]
+  ✗ XBEN-006-24  L1  findings=12  LOW     [idor, sqli]
+  ✗ XBEN-009-24  L1  findings=5   LOW     [ssti]
+  ✗ XBEN-020-24  L1  findings=4   LOW     [ssrf]
+```
 
-**Reference SOTA**: [Shannon](https://github.com/KeygraphHQ/shannon) hit 96.15% on the full 104-challenge suite (source-aware, white-box). MEGATRON is currently **black-box only** and does **recon + LLM-analysis** without a full exploitation loop, so baseline flag-capture is expected to be low (Tier 3 browser-automation is the roadmap item that closes this gap).
+**Reference SOTA**: [Shannon](https://github.com/KeygraphHQ/shannon) hit 96.15% on the full 104-challenge suite (source-aware, white-box + browser-driven exploitation).
 
-The value of this baseline isn't the raw score — it's establishing a measurable trajectory over time.
+**0/4 is exactly what we'd predict.** MEGATRON is currently a **black-box recon + LLM-analysis** tool — it doesn't drive a browser, doesn't chain findings into exploits, doesn't retrieve the actual `/flag.txt` or admin panel that would print the flag. It correctly enumerated 27-31 findings across the 4 targets (all cataloged, none critical enough to leak the flag).
+
+To close this gap → Tier 3 roadmap: browser automation (Playwright wrapper is the substrate, `run_playwright_probe()` already in tools.py); vulnerability chaining via knowledge-graph BFS; "No Exploit, No Report" mode where the LLM must execute a PoC to claim a finding.
+
+**The value of this baseline isn't the raw score — it's establishing a measurable trajectory over time.** Every time we improve MEGATRON's ability to actually exploit a class of vuln, this scoreboard should tick up.
+
+### One gotcha discovered during the baseline run
+
+Naabu on `127.0.0.1:32770` (docker-published port for XBEN-020) returned **1 filtered / 0 real** — our TCP-verify layer marked it filtered even though the container was up. Reason: docker's loopback publishing has some SYN-handling that our `_tcp_verify()` misclassifies. **Filed as a v0.5.3 candidate fix**: skip `_tcp_verify` when target port is >= 32768 (docker's dynamic-port range) OR use `curl -sI --max-time 2` as a fallback probe.
 
 To re-run yourself:
 ```bash
