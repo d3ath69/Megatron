@@ -1,6 +1,8 @@
 anyio==4.13.0
 ollama>=0.6.0
 pydantic>=2.10.0
+# Tier 3 optional extras — install with: pip install playwright && playwright install chromium
+# playwright>=1.47.0
 beautifulsoup4==4.14.3
 certifi==2026.2.25
 charset-normalizer==3.4.6

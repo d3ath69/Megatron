@@ -1,0 +1,58 @@
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: megatron-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpass
+      MARIADB_DATABASE: ${DB_NAME:-megatron}
+      MARIADB_USER: ${DB_USER:-megatron}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-123}
+    volumes:
+      - megatron-db:/var/lib/mysql
+      - ./docs/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - megatron-net
+
+  megatron:
+    build: .
+    image: megatron:latest
+    container_name: megatron
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+    environment:
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      MODEL_NAME: ${MODEL_NAME:-qwen2.5:7b-instruct}
+      MODEL_TEMPERATURE: ${MODEL_TEMPERATURE:-0.1}
+      MODEL_THINK: ${MODEL_THINK:-false}
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_USER: ${DB_USER:-megatron}
+      DB_PASSWORD: ${DB_PASSWORD:-123}
+      DB_NAME: ${DB_NAME:-megatron}
+    volumes:
+      - ./reports:/opt/megatron/reports
+      - ./exports:/opt/megatron/exports
+      - ./scans:/opt/megatron/scans
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - megatron-net
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+
+volumes:
+  megatron-db:
+
+networks:
+  megatron-net:
+    driver: bridge

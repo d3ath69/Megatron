@@ -569,6 +569,61 @@ def run_gowitness(target: str) -> str:
     )
 
 
+def run_playwright_probe(target: str) -> str:
+    """
+    Tier 3 browser-driven probe: launches headless Chromium via Playwright, loads the
+    target, extracts every <form>, every <input>, every <a href>, records HTTP requests
+    made by JS, and captures a screenshot. This is the foundation for the Shannon-style
+    "No Exploit, No Report" workflow — actual PoC execution builds on top of this.
+
+    Returns human-readable summary. Requires `playwright install chromium` on host.
+    Skips silently with a diagnostic if playwright isn't installed (kept optional).
+    """
+    url = _webify(target)
+    print(f"  [*] playwright probe {url} (headless chromium, form+link+xhr extraction)")
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: F401
+    except ImportError:
+        return "[playwright-probe] SKIPPED — install with: pip install playwright && playwright install chromium"
+
+    script = r"""
+import json, sys
+from playwright.sync_api import sync_playwright
+
+url = sys.argv[1]
+report = {"url": url, "forms": [], "inputs": [], "links": [], "xhr": [], "console": [], "title": None}
+
+with sync_playwright() as pw:
+    browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
+    ctx = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 800})
+    page = ctx.new_page()
+    page.on("request",  lambda r: report["xhr"].append({"method": r.method, "url": r.url, "resource_type": r.resource_type}) if r.resource_type in ("xhr", "fetch") else None)
+    page.on("console",  lambda m: report["console"].append({"type": m.type, "text": m.text[:200]}))
+    try:
+        page.goto(url, timeout=15000, wait_until="networkidle")
+    except Exception as e:
+        report["nav_error"] = str(e)[:200]
+    report["title"] = page.title()
+    for f in page.query_selector_all("form"):
+        report["forms"].append({
+            "action":  f.get_attribute("action") or "",
+            "method":  (f.get_attribute("method") or "GET").upper(),
+            "inputs":  [{"name": i.get_attribute("name"), "type": i.get_attribute("type") or "text"} for i in f.query_selector_all("input,textarea,select") if i.get_attribute("name")],
+        })
+    for inp in page.query_selector_all("input,textarea,select"):
+        name = inp.get_attribute("name")
+        if name:
+            report["inputs"].append({"name": name, "type": inp.get_attribute("type") or "text"})
+    for a in page.query_selector_all("a[href]")[:100]:
+        report["links"].append(a.get_attribute("href"))
+    page.screenshot(path="/tmp/megatron-playwright.png", full_page=True)
+    browser.close()
+
+print(json.dumps(report, indent=2))
+"""
+    return run_tool(["python3", "-c", script, url], timeout=45)
+
+
 _WAF_SIGS: list[tuple[str, str]] = [
     ("cloudflare",       "cf-ray"),
     ("cloudflare",       "server: cloudflare"),
@@ -643,6 +698,7 @@ TOOLS_MENU = {
     "w":  ("WAF detect",            detect_waf),
     "v":  ("gowitness screenshot",  run_gowitness),
     "y":  ("schemathesis (API fuzz)", run_schemathesis),
+    "b":  ("playwright probe (Tier 3)", run_playwright_probe),
 }
 
 

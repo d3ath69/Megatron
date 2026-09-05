@@ -57,10 +57,14 @@ _PRODUCT_ALIAS = {
 # CONFIG
 # ─────────────────────────────────────────────
 
-OLLAMA_HOST     = "http://localhost:11434"
-MODEL_NAME      = "qwen2.5:7b-instruct"
-MAX_TOOL_LOOPS  = 6          # cap ReAct rounds
-OLLAMA_TIMEOUT  = 600        # 7B on RTX 3070 = fast; 10min is plenty
+import os as _os
+
+OLLAMA_HOST     = _os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+MODEL_NAME      = _os.environ.get("MODEL_NAME", "qwen2.5:7b-instruct")
+MAX_TOOL_LOOPS  = int(_os.environ.get("MEGATRON_MAX_LOOPS", "6"))
+OLLAMA_TIMEOUT  = int(_os.environ.get("OLLAMA_TIMEOUT", "600"))
+_MODEL_TEMP     = float(_os.environ.get("MODEL_TEMPERATURE", "0.1"))
+_MODEL_THINK    = _os.environ.get("MODEL_THINK", "false").lower() in ("1", "true", "yes")
 
 _client = OllamaClient(host=OLLAMA_HOST, timeout=OLLAMA_TIMEOUT)
 
@@ -299,13 +303,13 @@ def _ask_structured(messages: list[dict]) -> ScanReport | None:
             model    = MODEL_NAME,
             messages = messages,
             format   = schema,            # ← Ollama enforces the JSON schema
-            think    = False,             # ← kill Qwen 3.5 over-thinking
+            think    = _MODEL_THINK,      # ← env-toggled; false for qwen2.5 / true for Qwythos reasoning
             options  = {
-                "temperature":  0.1,      # near-deterministic
+                "temperature":  _MODEL_TEMP,
                 "top_p":        0.9,
                 "top_k":        20,
                 "num_ctx":      16384,
-                "num_predict":  8192,
+                "num_predict":  16384,
             },
         )
     except Exception as e:

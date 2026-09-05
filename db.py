@@ -5,6 +5,7 @@ MariaDB connection + all read/write/edit/delete operations
 Database: megatron
 """
 
+import os
 import mysql.connector
 from datetime import datetime
 
@@ -14,12 +15,13 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 
 def get_connection():
-    """Returns a MariaDB connection. No password (local setup)."""
+    """Returns a MariaDB connection. Reads DB_* env vars for Docker; falls back to local lab defaults."""
     return mysql.connector.connect(
-        host="localhost",
-        user="megatron",
-        password="123",
-        database="megatron"
+        host=os.environ.get("DB_HOST", "localhost"),
+        port=int(os.environ.get("DB_PORT", "3306")),
+        user=os.environ.get("DB_USER", "megatron"),
+        password=os.environ.get("DB_PASSWORD", "123"),
+        database=os.environ.get("DB_NAME", "megatron"),
     )
 
 
