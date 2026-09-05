@@ -6,6 +6,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [0.5.1] — 2026-09-05
+
+**Dockerfile hardening + Qwythos-9B benchmark.**
+
+### Fixed
+- Dockerfile pinned all GitHub release URLs to explicit stable versions instead of `/latest` API calls. First `docker compose build` failed on the specialist-tools layer because anonymous GitHub API is rate-limited to 60 req/hour per IP — the URL-lookup loop for trufflehog/crlfuzz/gowitness returned empty strings mid-build, producing `curl -o pkg ""` → exit 3.
+- Pinned versions: naabu 2.6.1, subfinder 2.16.0, katana 1.7.0, httpx 1.10.0, nuclei 3.11.1, trufflehog 3.97.4, crlfuzz 1.4.1, gowitness 3.1.1, dalfox 3.2.2. Bonus: reproducible builds.
+
+### Verified
+- Full stack `docker compose up -d` on incubus: mariadb container healthy in 16s (schema.sql auto-loaded via `/docker-entrypoint-initdb.d/`); megatron container reaches host Ollama via `host.docker.internal:11434` (6 models visible) and mariadb via compose network hostname `mariadb`.
+
+### Benchmarked (RTX 3070, structured-output pipeline)
+- `qwen2.5:7b-instruct`: ~35 tok/s, 12 NVD-grounded findings on synthetic scan
+- `hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M`: **~114 tok/s (3.2× faster)**, same 12 findings, uncensored, Claude-fine-tuned. Requires `MODEL_TEMPERATURE=0.5` (their docs warn T≤0.3 causes loops) and `MODEL_THINK=false` (suppresses the reasoning-model prefix).
+- README updated to mark Qwythos as **recommended for CPTC**; qwen2.5 kept as safe default.
+
+---
+
+## [0.5.0] — 2026-09-05
+
+**Docker stack + env-var config + Tier 3 heavies (XBOW harness + Playwright).**
+
+### Added
+- **Dockerfile** (Ubuntu 24.04 base, 11 layers): pre-installs all 20+ tools (naabu, subfinder, katana, httpx-pd, nuclei, dalfox, feroxbuster, trufflehog, crlfuzz, gowitness, commix, sstimap, SSRFmap), SecLists (2.5GB), Python venv with pydantic + ollama + sqlmap + schemathesis + semgrep. Final image: **2.28 GB**.
+- **docker-compose.yml**: `megatron` + `mariadb` services with healthchecks, named volume for DB persistence, bind mounts for reports/exports/scans, `host.docker.internal:host-gateway` extra_host for Ollama-on-host.
+- **.dockerignore** so builds don't ship venv/git/scan-history.
+- **docs/DOCKER.md**: full container deployment guide — network topology diagram, GPU-on-host explanation, env-var reference, troubleshooting table, disk footprint breakdown.
+- **docs/INSTALL.md**: bare-metal step-by-step for Ubuntu 24.04 / Parrot OS with exact copy-paste blocks for every tool. Includes Qwythos alt-model swap recipe.
+- **docs/schema.sql**: 5-table MariaDB schema, dual-use (Docker init + bare-metal load).
+- **scripts/xbow_bench.py**: XBOW Validation Benchmarks harness. Subcommands: `--clone` / `--list` / `--run XBEN-NNN` / `--run-all` / `--score`. Clones the 104 CTF-style Docker challenges, iterates MEGATRON's pipeline against each, tracks flag-capture rate. Reference: Shannon 96.15%.
+- **`run_playwright_probe()`** in tools.py: headless Chromium via Playwright — extracts every `<form>`, `<input>`, `<a href>`, records JS-initiated xhr/fetch requests, captures console messages, full-page screenshot. Foundation for Shannon-style "No Exploit, No Report" workflow. Gracefully skips if playwright not installed (kept optional in requirements.txt).
+- Menu key `[b]` for playwright probe (28 total menu entries now).
+
+### Changed
+- **db.py** + **export.py**: `get_connection()` now reads `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` env vars with lab-default fallbacks. Enables Docker networking + external DB deployment.
+- **llm.py**: reads `OLLAMA_HOST` / `MODEL_NAME` / `MODEL_TEMPERATURE` / `MODEL_THINK` / `OLLAMA_TIMEOUT` / `MEGATRON_MAX_LOOPS` env vars. `_MODEL_THINK` toggle enables Qwythos-style reasoning models without breaking qwen2.5 default.
+
+---
+
 ## [0.4.0] — 2026-09-05
 
 **Tier 1 + Tier 2 + Tier 3 lite: 2025-2026 specialist stack integration.**
