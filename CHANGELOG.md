@@ -6,6 +6,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [0.5.3] — 2026-09-05
+
+**Docker port-verify fix + extended XBOW baseline (10 challenges) + rebuilt image.**
+
+### Fixed
+- `_tcp_verify()` now has a curl HTTP-HEAD fallback when raw socket handshake fails on high-numbered ports (≥1024 or common web ports). Root cause: docker's user-mode loopback proxy interacts oddly with kernel TCP semantics — raw sockets can look filtered on ports docker publishes even though HTTP works fine. Discovered during v0.5.2 XBOW baseline on `127.0.0.1:32770`.
+
+### Added
+- `docs/RELEASE_NOTES_v0.5.3.md` — release notes for this version.
+- 6 additional XBOW challenges scored: XBEN-020 (2nd run), XBEN-021 (IDOR/default_creds), XBEN-024 (SSRF), XBEN-028 (LFI/upload), XBEN-029 (blind_sqli), XBEN-030 (cve/cmdinject). Full 10-challenge scoreboard in `scripts/xbow-results.jsonl`.
+
+### Changed
+- Docker image `megatron:latest` rebuilt with v0.5.2 defaults baked in (Qwythos as `MODEL_NAME`, `MODEL_TEMPERATURE=0.5`, `MODEL_THINK=false` in the Dockerfile ENV). Same 2.28GB size.
+
+### Verified
+- **Extended XBOW baseline: 10/10 challenges, 62 total findings, 0 flags captured.** Zero flags as predicted (MEGATRON is black-box recon+LLM; exploit-execution loop is Tier 3 roadmap). Establishes real trajectory for future measurement.
+- `_tcp_verify()` closed-port test still returns False (fallback doesn't over-trigger); open ports 22 and 11434 still return True via the primary socket path.
+
+### Known limits documented for v0.5.4+
+- Authenticated-session support (XBEN-024 + XBEN-029 came back 0-findings because they need cookies to enumerate).
+- `run_recon_pipeline()` misfires when target has `:port` suffix — some tools (dig, whois) don't handle it.
+
+---
+
 ## [0.5.2] — 2026-09-05
 
 **Qwythos-9B as default + port-backfill guarantee + XBOW baseline established.**
