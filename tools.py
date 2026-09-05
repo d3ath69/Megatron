@@ -98,14 +98,29 @@ def run_nikto(target: str) -> str:
 
 def _tcp_verify(target: str, port: int, timeout: float = 3.0) -> bool:
     """
-    Fast raw TCP handshake. Ground-truth check that a port really accepts.
-    Kills naabu SYN-scan false positives (like port 6789 seen 2026-08-28).
+    Ground-truth check that a port really accepts. Two-stage:
+      1) raw TCP socket handshake — kills naabu SYN-scan false positives
+      2) fallback: HTTP HEAD via curl — catches docker's dynamic-port range (>=32768)
+         where the kernel's TCP semantics interact oddly with docker's user-mode
+         proxy (loopback publishing can look "filtered" to a raw socket but serve
+         HTTP fine). Bug seen v0.5.2 XBOW baseline on 127.0.0.1:32770.
     """
     try:
         with socket.create_connection((target, port), timeout=timeout):
             return True
     except (socket.timeout, ConnectionRefusedError, OSError):
+        pass
+    if port < 1024 and port not in (80, 443, 8080, 8443):
         return False
+    for scheme in ("http", "https"):
+        r = subprocess.run(
+            ["curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
+             "--max-time", "3", f"{scheme}://{target}:{port}/"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.stdout.strip().isdigit() and int(r.stdout.strip()) > 0:
+            return True
+    return False
 
 
 def run_tls_cert(target: str, port: int) -> str:
