@@ -212,6 +212,7 @@ Copy `.env.example` to `.env` and edit. All variables have safe defaults for a f
 | `AUTH_HEADER` | *(unset)* | e.g. `Authorization: Bearer eyJ...` |
 | `PLANNING_MODEL` | *(same as MODEL_NAME)* | v0.8.0: browser-loop planning model. Use a bigger model for better CSS selector picking. |
 | `MEGATRON_BROWSER_MAX_ACTIONS` | `15` | v0.8.0: browser exploit-loop action ceiling per finding. |
+| `MEGATRON_BROWSER_ANGLES` | `2` | v0.9.0: multi-shot ensemble — retry browser with N different prompt angles per finding. |
 | `MEGATRON_BOOTSTRAP_USER` / `_PASS` / `_EMAIL` | `megatron_test_user` / `M3g4tr0n!Test123` / `megatron@example.test` | v0.8.0: creds for auto-register+login before exploit loop. |
 | `NVD_API_KEY` | *(unset)* | Free at nvd.nist.gov — 5→50 req/30s |
 | `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `mariadb` / `3306` / `megatron` / `123` / `megatron` | Docker uses compose service names |

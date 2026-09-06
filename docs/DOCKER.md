@@ -77,6 +77,7 @@ All env vars have sensible lab defaults. Override in a `.env` file next to `dock
 | `MEGATRON_MAX_LOOPS` | `6` | Cap on ReAct dispatch rounds (LLM tool-call ping-pongs). |
 | `PLANNING_MODEL` | *(same as MODEL_NAME)* | v0.8.0: browser-loop planning model. Set to a bigger model (e.g., 27B) for better CSS selector picking. |
 | `MEGATRON_BROWSER_MAX_ACTIONS` | `15` | v0.8.0: browser exploit-loop action ceiling. Lower = faster scans, higher = deeper chains. |
+| `MEGATRON_BROWSER_ANGLES` | `2` | v0.9.0: multi-shot ensemble — retry browser exploit with N different prompt angles per finding. Total time scales roughly linearly. |
 | `MEGATRON_BOOTSTRAP_USER` / `_PASS` / `_EMAIL` | `megatron_test_user` / `M3g4tr0n!Test123` / `megatron@example.test` | v0.8.0: creds used by browser_agent.bootstrap_auth() to auto-register+login before exploit loop. Successful login exports cookies back to `AUTH_COOKIE`. |
 | `AUTH_COOKIE` | *(unset)* | e.g. `sessionid=abc123; csrftoken=xyz` — threaded through httpx / nuclei / katana / feroxbuster / dalfox / flag-hunt for authenticated scans. |
 | `AUTH_HEADER` | *(unset)* | e.g. `Authorization: Bearer eyJhbGci...` — same threading. |

@@ -6,6 +6,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [0.9.0] — 2026-09-06
+
+**Cross-finding param correlation + multi-shot ensemble + first XBOW L3 baseline.**
+
+### Added
+- **`_correlate_and_chain_exploit()` in llm.py** — novel differentiator. Extracts URL params (`?foo=`, `&foo=`) from every finding, groups by shared param, and if 2+ findings mention the same param, iterates vuln-class-appropriate payloads against it (numeric_idor / sqli / lfi / ssti / ssrf / xss). Time-boxed to ~5 min. Runs as final catch-all after per-finding browser + CLI give up. On FLAG capture, adds a synthetic critical Finding to the report.
+- **`_CHAIN_PAYLOADS` dict** — 6 vuln-class → payload-list mappings for correlation phase
+- **`_extract_params_from_findings()` helper** with `_PARAM_RE` regex
+- **Multi-shot ensemble in `_run_exploit_loop`** — iterates through `MEGATRON_BROWSER_ANGLES` (default 2) different prompt angles per finding. Angles: `default` / `lfi-first` / `sqli-first` / `idor-first` / `ssti-first` / `recon-again`. `_pick_angles_for_finding()` matches vuln class first, then falls back.
+- **`_RETRY_PROMPT_ANGLES` list** — 6 exploitation-angle prompt hints
+- **`_pick_angles_for_finding()`** — vuln-class-priority angle selector
+- **`_browser_exploit()` signature extended** with `prompt_angle` + `angle_hint` params; each retry = fresh browser session
+- **`MEGATRON_BROWSER_ANGLES` env var** (default 2) — user-tunable ensemble depth
+- **`docs/RELEASE_NOTES_v0.9.0.md`** with novel-vs-other-frameworks comparison
+
+### Changed
+- `_run_exploit_loop` now runs multi-shot per finding, then correlate-chain as final catch-all
+- README + DOCKER.md tables document new env var
+
+### XBOW v0.9.0 L3 baseline (3 diverse L3 challenges)
+- XBEN-093-24 (SSTI), XBEN-057-24 (insecure_deserialization), XBEN-066-24 (HTTP smuggling + default_creds)
+- Results in `scripts/xbow-results.jsonl`
+- Analysis in docs/RELEASE_NOTES_v0.9.0.md
+
+### Novel features vs any other open-source AI pentester (as of 2026-09)
+- Bidirectional auth cookie flow (v0.8.0)
+- Session-aware planning with LLM `session_note` memo (v0.8.0)
+- Cross-finding param correlation (v0.9.0)
+- Multi-shot ensemble with vuln-class-priority angles (v0.9.0)
+- Split PLANNING_MODEL routing (v0.8.0)
+- Ground-truth NVD verification + proactive product+version injection (v0.5-0.6)
+
+---
+
 ## [0.8.0] — 2026-09-05
 
 **Auth-flow bootstrap + session-aware planning + PLANNING_MODEL routing.**
