@@ -208,8 +208,11 @@ Copy `.env.example` to `.env` and edit. All variables have safe defaults for a f
 | `MODEL_THINK` | `false` | `true` only for reasoning models that need it |
 | `OLLAMA_HOST` | `host.docker.internal:11434` (Docker) or `localhost:11434` (bare) | Where Ollama runs |
 | `OLLAMA_TIMEOUT` | `600` | Bump to `1200` for 27B or slow paths |
-| `AUTH_COOKIE` | *(unset)* | e.g. `sessionid=abc; csrftoken=xyz` — threaded through httpx/nuclei/katana/feroxbuster/dalfox/flag-hunt for logged-in scans |
+| `AUTH_COOKIE` | *(unset)* | e.g. `sessionid=abc; csrftoken=xyz` — threaded through httpx/nuclei/katana/feroxbuster/dalfox/flag-hunt for logged-in scans. v0.8.0 also auto-populated by browser_agent.bootstrap_auth() after a successful login. |
 | `AUTH_HEADER` | *(unset)* | e.g. `Authorization: Bearer eyJ...` |
+| `PLANNING_MODEL` | *(same as MODEL_NAME)* | v0.8.0: browser-loop planning model. Use a bigger model for better CSS selector picking. |
+| `MEGATRON_BROWSER_MAX_ACTIONS` | `15` | v0.8.0: browser exploit-loop action ceiling per finding. |
+| `MEGATRON_BOOTSTRAP_USER` / `_PASS` / `_EMAIL` | `megatron_test_user` / `M3g4tr0n!Test123` / `megatron@example.test` | v0.8.0: creds for auto-register+login before exploit loop. |
 | `NVD_API_KEY` | *(unset)* | Free at nvd.nist.gov — 5→50 req/30s |
 | `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `mariadb` / `3306` / `megatron` / `123` / `megatron` | Docker uses compose service names |
 

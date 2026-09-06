@@ -6,6 +6,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [0.8.0] — 2026-09-05
+
+**Auth-flow bootstrap + session-aware planning + PLANNING_MODEL routing.**
+
+### Added
+- **`bootstrap_auth(session)`** in browser_agent.py — 3-phase auth establishment run BEFORE the browser exploit loop:
+  - Phase A: probe 6 common register paths, fill username/password/email/confirm fields with `MEGATRON_BOOTSTRAP_*` env vars, submit
+  - Phase B: probe 6 common login paths, try newly-registered creds + 10 common default creds (admin:admin, admin:password, root:root, test:test, guest:guest, etc.)
+  - Phase C: on successful login, extract cookie jar → `AUTH_COOKIE` env var → downstream CLI tools (sqlmap/dalfox/nuclei/etc) inherit the session
+- **`cookies_to_header()`** helper in browser_agent.py — Playwright cookie list → HTTP Cookie header value
+- **`_find_form_field(obs, purpose)`** in browser_agent.py — semantic field-picker (matches username/password/email/confirm patterns)
+- **`session_note` field** on BrowserPlan schema — LLM populates a memo to its future self; accumulated across all 15 actions
+- **Session-aware planning** in `_browser_exploit()`:
+  - GOAL persistent across all planning calls
+  - Last 10 actions (up from 4) with reasons
+  - Accumulated session_notes (last 8 shown per call)
+  - Stuck detection: same (url, visible_text[:500]) hit 3+ times → prompt warns "STUCK — try radically different or give_up=true"
+  - Inline payload cheatsheet in prompt
+- **`PLANNING_MODEL` env var** — separate model routing for browser-plan calls (defaults to `MODEL_NAME`). Allows using a bigger model (e.g., 27B) for planning while keeping the main model for schema-constrained output.
+- **`_ask_structured_typed()` model override** — optional `model_name` parameter routes the call to a specific model
+- **`MEGATRON_BROWSER_MAX_ACTIONS` env var** — was hardcoded to 15, now tunable
+- **`MEGATRON_BOOTSTRAP_USER` / `_PASS` / `_EMAIL` env vars** for customizing the bootstrap credentials
+
+### Changed
+- Browser exploit loop now runs `bootstrap_auth()` before the main plan-act loop
+- BrowserPlan schema extended with `session_note` field
+- `_ask_structured_typed()` signature: `_ask_structured_typed(prompt, schema_class, model_name=None)`
+- `.env.example`, README, DOCKER.md all updated with new env vars
+
+### v0.8.0 XBOW validation subset
+- 3 challenges targeting auth-bootstrap benefits: XBEN-005-24 (IDOR+JWT+default_creds), XBEN-021-24 (IDOR+default_creds), XBEN-020-24 (SSRF control)
+- Results in `scripts/xbow-results.jsonl`
+- Full analysis in docs/RELEASE_NOTES_v0.8.0.md
+
+---
+
 ## [0.7.0] — 2026-09-05
 
 **Browser-driven exploit loop (Playwright) + multi-tier ensemble + critical host:port bug fix.**
